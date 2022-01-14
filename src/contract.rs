@@ -1,5 +1,6 @@
 use std::panic;
 use cosmwasm_std::{Addr, Binary, Deps, DepsMut, Env, from_binary, MessageInfo, Response, StdError, StdResult, to_binary};
+use cosmwasm_storage::Bucket;
 use provwasm_std::{NameBinding, ProvenanceMsg, add_attribute, bind_name, Attributes, Attribute, ProvenanceQuerier};
 
 use crate::error::{ContractError, std_err_result};
@@ -8,20 +9,9 @@ use crate::state::{NameMeta, State, config, config_read, meta, meta_read};
 
 const MIN_FEE_AMOUNT: u64 = 0;
 
-fn validate_proposed_fee_amount(fee_amount: &String) -> StdResult<u64> {
-    let amount_value: u64 = match fee_amount.parse() {
-        Ok(amount) => amount,
-        Err(e) => {
-            return std_err_result(format!("unable to parse input fee amount {} as numeric:\n{}", fee_amount, e));
-        }
-    };
-    if amount_value < MIN_FEE_AMOUNT {
-        return std_err_result(format!("fee amount {} cannot be negative", amount_value));
-    }
-    Ok(amount_value)
-}
-
-/// Initialize the contract
+///
+/// INSTANTIATION SECTION
+///
 pub fn instantiate(
     deps: DepsMut,
     env: Env,
@@ -63,7 +53,22 @@ pub fn instantiate(
         .add_attribute("action", "init"))
 }
 
-/// Query contract state.
+fn validate_proposed_fee_amount(fee_amount: &String) -> StdResult<u64> {
+    let amount_value: u64 = match fee_amount.parse() {
+        Ok(amount) => amount,
+        Err(e) => {
+            return std_err_result(format!("unable to parse input fee amount {} as numeric:\n{}", fee_amount, e));
+        }
+    };
+    if amount_value < MIN_FEE_AMOUNT {
+        return std_err_result(format!("fee amount {} cannot be negative", amount_value));
+    }
+    Ok(amount_value)
+}
+
+///
+/// QUERY SECTION
+///
 pub fn query(
     deps: Deps,
     _env: Env,
@@ -135,7 +140,11 @@ fn deserialize_name_from_attribute(attribute: &Attribute) -> String {
     from_binary::<String>(&attribute.value).expect("name deserialization failed")
 }
 
-/// Handle purchase messages.
+///
+/// EXECUTE SECTION
+///
+/// TODO: Charge fees for registrations
+///
 pub fn execute(
     deps: DepsMut,
     _env: Env,
@@ -165,6 +174,10 @@ fn try_register(
 
     let mut meta_storage = meta(deps.storage);
 
+    // Ensure the provided name has not yet been registered. Bubble up the error if the lookup
+    // succeeds in finding the value
+    verify_no_matching_name(&name, &meta_storage)?;
+
     let name_meta = NameMeta {
         name: name.clone(),
         address: info.sender.into_string(),
@@ -180,7 +193,20 @@ fn try_register(
     )
 }
 
-/// Called when migrating a contract instance to a new code ID.
+fn verify_no_matching_name(name: &String, meta: &Bucket<NameMeta>) -> Result<String, ContractError> {
+    // If the load doesn't error out, that means it found the input name
+    if meta.load(name.as_bytes()).is_ok() {
+        Err(ContractError::NameRegistered { msg: format!("name [{}] is already registered", name) })
+    } else {
+        Ok("name not found".into())
+    }
+}
+
+///
+/// MIGRATE SECTION
+///
+/// TODO: Allow fee amount swap across migrations
+///
 pub fn migrate(
     _deps: DepsMut,
     _env: Env,
@@ -189,6 +215,9 @@ pub fn migrate(
     Ok(Response::default())
 }
 
+///
+/// TEST SECTION
+///
 #[cfg(test)]
 mod tests {
     use crate::msg::QueryResponse;
@@ -205,17 +234,7 @@ mod tests {
         let mut deps = mock_dependencies(&[]);
 
         // Create valid config state
-        let res = instantiate(
-            deps.as_mut(),
-            mock_env(),
-            mock_info("admin", &[]),
-            InitMsg {
-                name: "wallet.pb".into(),
-                fee_amount: "100000000000".into(),
-                fee_collection_address: "tp123".into()
-            },
-        )
-        .unwrap();
+        let res = test_instantiate(InstArgs::Basic { deps: deps.as_mut() }).unwrap();
 
         // Ensure a message was created to bind the name to the contract address.
         assert_eq!(res.messages.len(), 1);
@@ -237,17 +256,7 @@ mod tests {
         let mut deps = mock_dependencies(&[]);
 
         // Create config state
-        instantiate(
-            deps.as_mut(),
-            mock_env(),
-            mock_info("feebucket", &[]),
-            InitMsg {
-                name: "wallet.pb".into(),
-                fee_amount: "100000000000".into(),
-                fee_collection_address: "tp123".into()
-            },
-        )
-        .unwrap(); // Panics on error
+        test_instantiate(InstArgs::Basic { deps: deps.as_mut() }).unwrap();
 
         // Call the smart contract query function to get stored state.
         let bin = query(deps.as_ref(), mock_env(), QueryMsg::QueryRequest {}).unwrap();
@@ -263,28 +272,10 @@ mod tests {
         let mut deps = mock_dependencies(&[]);
 
         // Create config state
-        instantiate(
-            deps.as_mut(),
-            mock_env(),
-            mock_info("admin", &[]),
-            InitMsg {
-                name: "wallet.pb".into(),
-                fee_amount: "100000000000".into(),
-                fee_collection_address: "tp123".into()
-            },
-        )
-        .unwrap();
+        test_instantiate(InstArgs::Basic { deps: deps.as_mut() }).unwrap();
 
         let m_info = mock_info("somedude", &[]);
-        let res = execute(
-            deps.as_mut(),
-            mock_env(),
-            m_info.clone(),
-            ExecuteMsg::Register {
-                name: "mycoolname".into(),
-            },
-        )
-        .unwrap();
+        let res = do_registration(deps.as_mut(), m_info.clone(), "mycoolname".into()).unwrap();
 
         // Ensure we have the attribute message
         assert_eq!(res.messages.len(), 1);
@@ -309,6 +300,26 @@ mod tests {
     }
 
     #[test]
+    fn test_duplicate_registrations_are_rejected() {
+        // Create mocks
+        let mut deps = mock_dependencies(&[]);
+
+        // Create config state
+        test_instantiate(InstArgs::Basic { deps: deps.as_mut() }).unwrap();
+        let m_info = mock_info("somedude", &[]);
+        // Do first execution to ensure the new name is in there
+        do_registration(deps.as_mut(), m_info.clone(), "mycoolname".into()).unwrap();
+        // Try a duplicate request
+        let rejected = do_registration(deps.as_mut(), m_info.clone(), "mycoolname".into()).unwrap_err();
+        match rejected {
+            ContractError::NameRegistered { msg } => {
+                assert_eq!(msg, "name [mycoolname] is already registered")
+            },
+            _ => panic!("unexpected error for proposed duplicate message"),
+        }
+    }
+
+    #[test]
     fn test_deserialize_name_from_attribute() {
         let attribute = create_fake_name_attribute("test_name");
         assert_eq!("test_name", deserialize_name_from_attribute(&attribute));
@@ -330,6 +341,33 @@ mod tests {
         assert_eq!(2, name_response.names.len(), "the two names should be in the response");
     }
 
+    #[test]
+    fn test_name_registration_and_lookup_by_address() {
+        // Create mocks
+        let mut deps = mock_dependencies(&[]);
+
+        // Create config state
+        test_instantiate(InstArgs::Basic { deps: deps.as_mut() }).unwrap();
+        let address = "registration_guy";
+        let mock_info = mock_info(&address, &[]);
+        let target_name = "bestnameever";
+        // Drop the name into the system
+        do_registration(deps.as_mut(), mock_info.clone(), target_name.into()).unwrap();
+        let name_response_binary = query(
+            deps.as_ref(),
+            mock_env(),
+            QueryMsg::QueryNamesByAddress { address: "admin".into() },
+        ).unwrap();
+        let _name_response: NameResponse = from_binary(&name_response_binary)
+            .expect("Expected the response to correctly deserialize to a NameResp value");
+        // TODO: Figure out how to simulate the name registration.  This currently doesn't work
+        // TODO: because the execution phase doesn't actually execute the name association portion.
+        // TODO: On the bright side, I was able to test this against my localnet and it WORKS!
+        // assert_eq!(address.to_string(), name_response.address, "Expected the name response to contain the target address");
+        // assert_eq!(1, name_response.names.len(), "Expected the name response to have a single name in its name payload");
+    }
+
+    /// Helper to build an Attribute without having to do all the un-fun stuff repeatedly
     fn create_fake_name_attribute(name: &str) -> Attribute {
         Attribute {
             name: "wallet.pb".into(),
@@ -338,45 +376,40 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_name_registration_and_lookup_by_address() {
-        // Create mocks
-        let mut deps = mock_dependencies(&[]);
-
-        // Create config state
-        instantiate(
-            deps.as_mut(),
+    /// Helper to do a registration without all the extra boilerplate
+    fn do_registration(
+        deps: DepsMut,
+        message_info: MessageInfo,
+        name: String,
+    ) -> Result<Response<ProvenanceMsg>, ContractError> {
+        execute(
+            deps,
             mock_env(),
-            mock_info("admin", &[]),
+            message_info,
+            ExecuteMsg::Register { name, },
+        )
+    }
+
+    /// Driver for multiple instantiate types, on the chance that different defaults are needed
+    enum InstArgs<'a> {
+        Basic { deps: DepsMut<'a> },
+        WithInfo { deps: DepsMut<'a>, info: MessageInfo },
+    }
+
+    fn test_instantiate(inst: InstArgs) -> Result<Response<ProvenanceMsg>, StdError> {
+        let (deps, info) = match inst {
+            InstArgs::Basic { deps } => (deps, mock_info("admin", &[])),
+            InstArgs::WithInfo { deps, info } => (deps, info),
+        };
+        instantiate(
+            deps,
+            mock_env(),
+            info,
             InitMsg {
                 name: "wallet.pb".into(),
-                fee_amount: "100000000000".into(),
-                fee_collection_address: "tp123".into()
-            },
-        ).unwrap();
-        let address = "registration_guy";
-        let mock_info = mock_info(&address, &[]);
-        let target_name = "bestnameever";
-        // Drop the name into the system
-        execute(
-            deps.as_mut(),
-            mock_env(),
-            mock_info.clone(),
-            ExecuteMsg::Register {
-                name: target_name.into(),
-            },
-        ).unwrap();
-        let name_response_binary = query(
-            deps.as_ref(),
-            mock_env(),
-            QueryMsg::QueryNamesByAddress { address: "admin".into() },
-        ).unwrap();
-        let name_response: NameResponse = from_binary(&name_response_binary)
-            .expect("Expected the response to correctly deserialize to a NameResp value");
-        // TODO: Figure out how to simulate the name registration.  This currently doesn't work
-        // TODO: because the execution phase doesn't actually execute the name association portion.
-        // TODO: On the bright side, I was able to test this against my localnet and it WORKS!
-        // assert_eq!(address.to_string(), name_response.address, "Expected the name response to contain the target address");
-        // assert_eq!(1, name_response.names.len(), "Expected the name response to have a single name in its name payload");
+                fee_amount: "10000000000".into(),
+                fee_collection_address: "tp123".into(),
+            }
+        )
     }
 }

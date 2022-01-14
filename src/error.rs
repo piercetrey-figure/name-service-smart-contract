@@ -12,7 +12,7 @@ pub enum ContractError {
     // Look at https://docs.rs/thiserror/1.0.21/thiserror/ for details.
 
     #[error("Name is already registered")]
-    NameRegistered,
+    NameRegistered { msg: String },
 
     #[error("Name not found")]
     NameNotFound,
