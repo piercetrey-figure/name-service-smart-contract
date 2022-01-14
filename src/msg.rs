@@ -35,3 +35,15 @@ pub type QueryResponse = State;
 #[serde(rename_all = "snake_case")]
 pub struct MigrateMsg {
 }
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct NameResponse {
+    pub address: String,
+    pub names: Vec<String>,
+}
+impl NameResponse {
+    pub fn new(address: String, names: Vec<String>) -> NameResponse {
+        NameResponse { address, names, }
+    }
+}

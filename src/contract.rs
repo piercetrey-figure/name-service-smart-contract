@@ -1,9 +1,9 @@
-use cosmwasm_std::{Binary, Deps, DepsMut, Env, from_binary, MessageInfo, QueryRequest, Response, StdError, StdResult, to_binary};
-use provwasm_std::{NameBinding, ProvenanceMsg, add_attribute, bind_name, ProvenanceQuery, ProvenanceRoute, ProvenanceQueryParams, AttributeQueryParams, Attributes, Attribute};
-use crate::contract_info::CONTRACT_VERSION;
+use std::panic;
+use cosmwasm_std::{Addr, Binary, Deps, DepsMut, Env, from_binary, MessageInfo, Response, StdError, StdResult, to_binary};
+use provwasm_std::{NameBinding, ProvenanceMsg, add_attribute, bind_name, Attributes, Attribute, ProvenanceQuerier};
 
 use crate::error::{ContractError, std_err_result};
-use crate::msg::{ExecuteMsg, InitMsg, MigrateMsg, QueryMsg };
+use crate::msg::{ExecuteMsg, InitMsg, MigrateMsg, NameResponse, QueryMsg};
 use crate::state::{NameMeta, State, config, config_read, meta, meta_read};
 
 const MIN_FEE_AMOUNT: u64 = 0;
@@ -81,14 +81,18 @@ pub fn query(
             let json = to_binary(&name_meta)?;
             Ok(json)
         },
-        // Oh man, how does this even work?
         QueryMsg::QueryNamesByAddress { address } => try_query_by_address(deps, address),
     }
 }
 
 fn try_query_by_address(deps: Deps, address: String) -> StdResult<Binary> {
     // Implicitly pull the root registrar name out of the state
-    let registrar_name = config_read(deps.storage).load()?.name;
+    let registrar_name = match config_read(deps.storage).load() {
+        Ok(config) => config.name,
+        Err(e) => {
+            return std_err_result(format!("failed to load registrar name: {:?}", e));
+        }
+    };
     // Validate and convert the provided address into an Addr for the attribute query
     let validated_address = match deps.api.addr_validate(address.as_str()) {
         Ok(addr) => addr,
@@ -97,29 +101,34 @@ fn try_query_by_address(deps: Deps, address: String) -> StdResult<Binary> {
         }
     };
     // Check for the registered name inside the attributes of the target address
-    let attribute_container: Attributes = match deps.querier.custom_query(&QueryRequest::Custom(
-        ProvenanceQuery {
-            route: ProvenanceRoute::Attribute,
-            params: ProvenanceQueryParams::Attribute(AttributeQueryParams::GetAttributes {
-                address: validated_address,
-                name: registrar_name,
-            }),
-            version: CONTRACT_VERSION.into(),
-        }
-    )) {
+    let attribute_container: Attributes = match try_query_attributes(deps, validated_address, registrar_name) {
         Ok(attributes) => attributes,
         Err(e) => {
-            return std_err_result(format!("failed to lookup account by address [{}]: {:?}", address, e));
+            return std_err_result(format!("failed to lookup account by address [{}]: {:?}", address.clone(), e));
         }
     };
     // Deserialize all names from their binary-encoded values to the source strings
-    let located_names: Vec<String> = attribute_container
-        .attributes
-        .into_iter()
+    let response_bin = match pack_response_from_attributes(attribute_container) {
+        Ok(binary) => binary,
+        Err(e) => {
+            return std_err_result(format!("failed to pack attribute response to binary: {:?}", e))
+        }
+    };
+    // After establishing a vector of all derived names, serialize the list itself to a binary response
+    Ok(response_bin)
+}
+
+fn try_query_attributes(deps: Deps, address: Addr, name: String) -> StdResult<Attributes> {
+    let querier = ProvenanceQuerier::new(&deps.querier);
+    return querier.get_attributes(address, Some(name));
+}
+
+fn pack_response_from_attributes(attributes: Attributes) -> StdResult<Binary> {
+    let names = attributes.attributes
+        .iter()
         .map(|attr| deserialize_name_from_attribute(&attr))
         .collect();
-    // After establishing a vector of all derived names, serialize the list itself to a binary response
-    Ok(to_binary(&located_names)?)
+    to_binary(&NameResponse::new(attributes.address.into_string(), names))
 }
 
 fn deserialize_name_from_attribute(attribute: &Attribute) -> String {
@@ -146,7 +155,13 @@ fn try_register(
 ) -> Result<Response<ProvenanceMsg>, ContractError> {
     let config = config(deps.storage).load()?;
 
-    let add_attribute_message = add_attribute(info.sender.clone(), config.name, Binary(name.clone().into()), provwasm_std::AttributeValueType::String)?;
+    let add_attribute_message = add_attribute(
+        info.sender.clone(),
+        config.name,
+        // TODO: Handle binary deserialization errors gracefully instead of going ham like this
+        to_binary(&name.clone()).unwrap(),
+        provwasm_std::AttributeValueType::String
+    )?;
 
     let mut meta_storage = meta(deps.storage);
 
@@ -279,7 +294,7 @@ mod tests {
                 match params {
                     ProvenanceMsgParams::Attribute(AttributeMsgParams::AddAttribute { name, value, value_type, .. }) => {
                         assert_eq!(name, "wallet.pb");
-                        assert_eq!(value, Binary("mycoolname".into()));
+                        assert_eq!(value, to_binary("mycoolname".into()).unwrap());
                         assert_eq!(value_type, AttributeValueType::String)
                     }
                     _ => panic!("unexpected provenance message type")
@@ -294,7 +309,37 @@ mod tests {
     }
 
     #[test]
-    fn test_query_by_address() {
+    fn test_deserialize_name_from_attribute() {
+        let attribute = create_fake_name_attribute("test_name");
+        assert_eq!("test_name", deserialize_name_from_attribute(&attribute));
+    }
+
+    #[test]
+    fn test_pack_response_from_attributes() {
+        let first_name = create_fake_name_attribute("name1");
+        let second_name = create_fake_name_attribute("name2");
+        let attribute_container = Attributes {
+            address: Addr::unchecked("my_address"),
+            attributes: vec![first_name, second_name],
+        };
+        let bin = pack_response_from_attributes(attribute_container)
+            .expect("pack_response_from_attributes should create a valid binary");
+        let name_response: NameResponse = from_binary(&bin)
+            .expect("the generated binary should be resolvable to the source name response");
+        assert_eq!("my_address", name_response.address.as_str(), "the source address should be exposed in the query");
+        assert_eq!(2, name_response.names.len(), "the two names should be in the response");
+    }
+
+    fn create_fake_name_attribute(name: &str) -> Attribute {
+        Attribute {
+            name: "wallet.pb".into(),
+            value: to_binary(name.into()).unwrap(),
+            value_type: AttributeValueType::String,
+        }
+    }
+
+    #[test]
+    fn test_name_registration_and_lookup_by_address() {
         // Create mocks
         let mut deps = mock_dependencies(&[]);
 
@@ -309,11 +354,29 @@ mod tests {
                 fee_collection_address: "tp123".into()
             },
         ).unwrap();
-        let _res = query(
+        let address = "registration_guy";
+        let mock_info = mock_info(&address, &[]);
+        let target_name = "bestnameever";
+        // Drop the name into the system
+        execute(
+            deps.as_mut(),
+            mock_env(),
+            mock_info.clone(),
+            ExecuteMsg::Register {
+                name: target_name.into(),
+            },
+        ).unwrap();
+        let name_response_binary = query(
             deps.as_ref(),
             mock_env(),
-            QueryMsg::QueryNamesByAddress { address: "fake_address".into() },
+            QueryMsg::QueryNamesByAddress { address: "admin".into() },
         ).unwrap();
-
+        let name_response: NameResponse = from_binary(&name_response_binary)
+            .expect("Expected the response to correctly deserialize to a NameResp value");
+        // TODO: Figure out how to simulate the name registration.  This currently doesn't work
+        // TODO: because the execution phase doesn't actually execute the name association portion.
+        // TODO: On the bright side, I was able to test this against my localnet and it WORKS!
+        // assert_eq!(address.to_string(), name_response.address, "Expected the name response to contain the target address");
+        // assert_eq!(1, name_response.names.len(), "Expected the name response to have a single name in its name payload");
     }
 }
