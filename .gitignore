@@ -12,5 +12,6 @@ Cargo.lock
 # build output
 artifacts
 
-# remove files created by IDEs that scrublords like Jake uses
+# IDE BS
 /.idea/
+/.vscode/

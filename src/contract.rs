@@ -1,9 +1,24 @@
 use cosmwasm_std::{Binary, Deps, DepsMut, Env, MessageInfo, Response, StdError, StdResult, to_binary};
 use provwasm_std::{NameBinding, ProvenanceMsg, add_attribute, bind_name};
 
-use crate::error::ContractError;
+use crate::error::{ContractError, std_err_result};
 use crate::msg::{ExecuteMsg, InitMsg, MigrateMsg, QueryMsg };
 use crate::state::{NameMeta, State, config, config_read, meta, meta_read};
+
+const MIN_FEE_AMOUNT: u64 = 0;
+
+fn validate_fee_charged(fee_amount: &String) -> StdResult<u64> {
+    let amount_value: u64 = match fee_amount.parse() {
+        Ok(amount) => amount,
+        Err(e) => {
+            return std_err_result(format!("unable to parse input fee amount {} as numeric:\n{}", fee_amount, e));
+        }
+    };
+    if amount_value < MIN_FEE_AMOUNT {
+        return std_err_result(format!("fee amount {} cannot be negative", amount_value));
+    }
+    Ok(amount_value)
+}
 
 /// Initialize the contract
 pub fn instantiate(
@@ -14,16 +29,21 @@ pub fn instantiate(
 ) -> Result<Response<ProvenanceMsg>, StdError> {
     // Ensure no funds were sent with the message
     if !info.funds.is_empty() {
-        let err = "purchase funds are not allowed to be sent during init";
-        return Err(StdError::generic_err(err));
+        return std_err_result("purchase funds are not allowed to be sent during init");
     }
-
+    // Flatten fee validation
+    validate_fee_charged(&msg.fee_amount)?;
     // Create and save contract config state. The name is used for setting attributes on user accounts
-    config(deps.storage).save(&State {
+    match config(deps.storage).save(&State {
         name: msg.name.clone(),
         fee_amount: msg.fee_amount.clone(),
         fee_collection_address: msg.fee_collection_address.clone(),
-    })?;
+    }) {
+        Ok(_) => {},
+        Err(e) => {
+            return std_err_result(format!("failed to init state {}", e.to_string()));
+        }
+    };
 
     // Create a message that will bind a restricted name to the contract address.
     let bind_name_msg = bind_name(
@@ -62,19 +82,18 @@ pub fn query(
 /// Handle purchase messages.
 pub fn execute(
     deps: DepsMut,
-    env: Env,
+    _env: Env,
     info: MessageInfo,
     msg: ExecuteMsg,
 ) -> Result<Response<ProvenanceMsg>, ContractError> {
     match msg {
-        ExecuteMsg::Register { name} => try_register(deps, env, info, name),
+        ExecuteMsg::Register { name} => try_register(deps, info, name),
     }
 }
 
 // register a name
 fn try_register(
     deps: DepsMut,
-    env: Env,
     info: MessageInfo,
     name: String,
 ) -> Result<Response<ProvenanceMsg>, ContractError> {

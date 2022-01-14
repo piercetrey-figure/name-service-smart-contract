@@ -20,3 +20,8 @@ pub enum ContractError {
     #[error("Invalid fields: {fields:?}")]
     InvalidFields { fields: Vec<String> },
 }
+
+/// A simple abstraction to wrap an error response just by passing the message
+pub fn std_err_result<T>(msg: impl Into<String>) -> Result<T, StdError> {
+    Err(StdError::generic_err(msg))
+}
