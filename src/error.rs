@@ -1,4 +1,4 @@
-use cosmwasm_std::StdError;
+use cosmwasm_std::{StdError, StdResult};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -22,6 +22,6 @@ pub enum ContractError {
 }
 
 /// A simple abstraction to wrap an error response just by passing the message
-pub fn std_err_result<T>(msg: impl Into<String>) -> Result<T, StdError> {
+pub fn std_err_result<T>(msg: impl Into<String>) -> StdResult<T> {
     Err(StdError::generic_err(msg))
 }

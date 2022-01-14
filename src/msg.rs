@@ -23,7 +23,8 @@ pub enum ExecuteMsg {
 #[serde(rename_all = "snake_case")]
 pub enum QueryMsg {
     QueryRequest {},
-    ResolveName { name: String },
+    QueryAddressByName { name: String },
+    QueryNamesByAddress { address: String },
 }
 
 /// A type alias for contract state.

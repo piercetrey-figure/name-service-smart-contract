@@ -1,5 +1,6 @@
-use cosmwasm_std::{Binary, Deps, DepsMut, Env, MessageInfo, Response, StdError, StdResult, to_binary};
-use provwasm_std::{NameBinding, ProvenanceMsg, add_attribute, bind_name};
+use cosmwasm_std::{Binary, Deps, DepsMut, Env, from_binary, MessageInfo, QueryRequest, Response, StdError, StdResult, to_binary};
+use provwasm_std::{NameBinding, ProvenanceMsg, add_attribute, bind_name, ProvenanceQuery, ProvenanceRoute, ProvenanceQueryParams, AttributeQueryParams, Attributes, Attribute};
+use crate::contract_info::CONTRACT_VERSION;
 
 use crate::error::{ContractError, std_err_result};
 use crate::msg::{ExecuteMsg, InitMsg, MigrateMsg, QueryMsg };
@@ -7,7 +8,7 @@ use crate::state::{NameMeta, State, config, config_read, meta, meta_read};
 
 const MIN_FEE_AMOUNT: u64 = 0;
 
-fn validate_fee_charged(fee_amount: &String) -> StdResult<u64> {
+fn validate_proposed_fee_amount(fee_amount: &String) -> StdResult<u64> {
     let amount_value: u64 = match fee_amount.parse() {
         Ok(amount) => amount,
         Err(e) => {
@@ -32,7 +33,7 @@ pub fn instantiate(
         return std_err_result("purchase funds are not allowed to be sent during init");
     }
     // Flatten fee validation
-    validate_fee_charged(&msg.fee_amount)?;
+    validate_proposed_fee_amount(&msg.fee_amount)?;
     // Create and save contract config state. The name is used for setting attributes on user accounts
     match config(deps.storage).save(&State {
         name: msg.name.clone(),
@@ -41,16 +42,20 @@ pub fn instantiate(
     }) {
         Ok(_) => {},
         Err(e) => {
-            return std_err_result(format!("failed to init state {}", e.to_string()));
+            return std_err_result(format!("failed to init state: {:?}", e));
         }
     };
-
     // Create a message that will bind a restricted name to the contract address.
-    let bind_name_msg = bind_name(
+    let bind_name_msg = match bind_name(
         &msg.name,
         env.contract.address,
         NameBinding::Restricted,
-    )?;
+    ) {
+        Ok(result) => result,
+        Err(e) => {
+            return std_err_result(format!("failed to construct bind name message: {:?}", e));
+        }
+    };
 
     // Dispatch messages and emit event attributes
     Ok(Response::new()
@@ -70,13 +75,55 @@ pub fn query(
             let json = to_binary(&state)?;
             Ok(json)
         }
-        QueryMsg::ResolveName { name } => {
+        QueryMsg::QueryAddressByName { name } => {
             let meta_storage = meta_read(deps.storage);
             let name_meta = meta_storage.load(name.as_bytes())?;
             let json = to_binary(&name_meta)?;
             Ok(json)
         },
+        // Oh man, how does this even work?
+        QueryMsg::QueryNamesByAddress { address } => try_query_by_address(deps, address),
     }
+}
+
+fn try_query_by_address(deps: Deps, address: String) -> StdResult<Binary> {
+    // Implicitly pull the root registrar name out of the state
+    let registrar_name = config_read(deps.storage).load()?.name;
+    // Validate and convert the provided address into an Addr for the attribute query
+    let validated_address = match deps.api.addr_validate(address.as_str()) {
+        Ok(addr) => addr,
+        Err(e) => {
+            return std_err_result(format!("invalid address provided [{}]: {:?}", address, e));
+        }
+    };
+    // Check for the registered name inside the attributes of the target address
+    let attribute_container: Attributes = match deps.querier.custom_query(&QueryRequest::Custom(
+        ProvenanceQuery {
+            route: ProvenanceRoute::Attribute,
+            params: ProvenanceQueryParams::Attribute(AttributeQueryParams::GetAttributes {
+                address: validated_address,
+                name: registrar_name,
+            }),
+            version: CONTRACT_VERSION.into(),
+        }
+    )) {
+        Ok(attributes) => attributes,
+        Err(e) => {
+            return std_err_result(format!("failed to lookup account by address [{}]: {:?}", address, e));
+        }
+    };
+    // Deserialize all names from their binary-encoded values to the source strings
+    let located_names: Vec<String> = attribute_container
+        .attributes
+        .into_iter()
+        .map(|attr| deserialize_name_from_attribute(&attr))
+        .collect();
+    // After establishing a vector of all derived names, serialize the list itself to a binary response
+    Ok(to_binary(&located_names)?)
+}
+
+fn deserialize_name_from_attribute(attribute: &Attribute) -> String {
+    from_binary::<String>(&attribute.value).expect("name deserialization failed")
 }
 
 /// Handle purchase messages.
@@ -244,5 +291,29 @@ mod tests {
         // Ensure we got the name event attribute value
         let attribute = res.attributes.into_iter().find(|attr| attr.key == "name").unwrap();
         assert_eq!(attribute.value, "mycoolname");
+    }
+
+    #[test]
+    fn test_query_by_address() {
+        // Create mocks
+        let mut deps = mock_dependencies(&[]);
+
+        // Create config state
+        instantiate(
+            deps.as_mut(),
+            mock_env(),
+            mock_info("admin", &[]),
+            InitMsg {
+                name: "wallet.pb".into(),
+                fee_amount: "100000000000".into(),
+                fee_collection_address: "tp123".into()
+            },
+        ).unwrap();
+        let _res = query(
+            deps.as_ref(),
+            mock_env(),
+            QueryMsg::QueryNamesByAddress { address: "fake_address".into() },
+        ).unwrap();
+
     }
 }
