@@ -1,13 +1,13 @@
-use std::panic;
 use cosmwasm_std::{Addr, Binary, Deps, DepsMut, Env, from_binary, MessageInfo, Response, StdError, StdResult, to_binary};
 use cosmwasm_storage::Bucket;
-use provwasm_std::{NameBinding, ProvenanceMsg, add_attribute, bind_name, Attributes, Attribute, ProvenanceQuerier};
+use provwasm_std::{NameBinding, ProvenanceMsg, add_attribute, bind_name, Attributes, Attribute, ProvenanceQuerier, transfer_marker_coins};
+use crate::contract_info::FEE_DENOMINATION;
 
 use crate::error::{ContractError, std_err_result};
 use crate::msg::{ExecuteMsg, InitMsg, MigrateMsg, NameResponse, QueryMsg};
 use crate::state::{NameMeta, State, config, config_read, meta, meta_read};
 
-const MIN_FEE_AMOUNT: u64 = 0;
+const MIN_FEE_AMOUNT: u128 = 0;
 
 ///
 /// INSTANTIATION SECTION
@@ -53,13 +53,8 @@ pub fn instantiate(
         .add_attribute("action", "init"))
 }
 
-fn validate_proposed_fee_amount(fee_amount: &String) -> StdResult<u64> {
-    let amount_value: u64 = match fee_amount.parse() {
-        Ok(amount) => amount,
-        Err(e) => {
-            return std_err_result(format!("unable to parse input fee amount {} as numeric:\n{}", fee_amount, e));
-        }
-    };
+fn validate_proposed_fee_amount(fee_amount: &String) -> StdResult<u128> {
+    let amount_value = fee_amount_from_string(fee_amount)?;
     if amount_value < MIN_FEE_AMOUNT {
         return std_err_result(format!("fee amount {} cannot be negative", amount_value));
     }
@@ -152,7 +147,7 @@ pub fn execute(
     msg: ExecuteMsg,
 ) -> Result<Response<ProvenanceMsg>, ContractError> {
     match msg {
-        ExecuteMsg::Register { name} => try_register(deps, info, name),
+        ExecuteMsg::Register { name } => try_register(deps, info, name),
     }
 }
 
@@ -164,11 +159,22 @@ fn try_register(
 ) -> Result<Response<ProvenanceMsg>, ContractError> {
     let config = config(deps.storage).load()?;
 
+    // Fetch the name registry bucket from storage for use in dupe verification, as well as
+    // storing the new name if validation passes
+    let mut meta_storage = meta(deps.storage);
+
+    // Ensure the provided name has not yet been registered. Bubble up the error if the lookup
+    // succeeds in finding the value
+    verify_no_matching_name(&name, &meta_storage)?;
+
+    // Serialize the proposed name as binary, allowing it to be sent via the ProvenanceClient as
+    // a new attribute under the registrar
     let name_bin = match to_binary(&name) {
         Ok(bin) => bin,
         Err(e) => { return Err(ContractError::NameSerializationFailure { cause: e }); },
     };
 
+    // Construct the new attribute message for dispatch
     let add_attribute_message = add_attribute(
         info.sender.clone(),
         config.name,
@@ -176,22 +182,24 @@ fn try_register(
         provwasm_std::AttributeValueType::String
     )?;
 
-    let mut meta_storage = meta(deps.storage);
+    // Don't forget to charge the fee for the name
+    let fee_charge_message = transfer_marker_coins(
+        fee_amount_from_string(&config.fee_amount)?,
+        FEE_DENOMINATION.to_string(),
+        deps.api.addr_validate(&config.fee_collection_address)?,
+        info.sender.clone(),
+    )?;
 
-    // Ensure the provided name has not yet been registered. Bubble up the error if the lookup
-    // succeeds in finding the value
-    verify_no_matching_name(&name, &meta_storage)?;
-
-    let name_meta = NameMeta {
-        name: name.clone(),
-        address: info.sender.into_string(),
-    };
-
+    // Construct and store a NameMeta to the internal bucket.  This is important, because this
+    // registry ensures duplicates names cannot be added, as well as allow addresses to be looked
+    // up by name
+    let name_meta = NameMeta { name: name.clone(), address: info.sender.into_string(), };
     meta_storage.save(name.clone().as_bytes(), &name_meta)?;
 
     // Return a response that will dispatch the marker messages and emit events.
     Ok(Response::new()
         .add_message(add_attribute_message)
+        .add_message(fee_charge_message)
         .add_attribute("action", "name_register")
         .add_attribute("name", name)
     )
@@ -220,6 +228,16 @@ pub fn migrate(
 }
 
 ///
+/// SHARED FUNCTIONALITY SECTION
+///
+fn fee_amount_from_string(fee_amount_string: &String) -> StdResult<u128> {
+    match fee_amount_string.parse::<u128>() {
+        Ok(amount) => Ok(amount),
+        Err(e) => std_err_result(format!("unable to parse input fee amount {} as numeric:\n{}", fee_amount_string, e))
+    }
+}
+
+///
 /// TEST SECTION
 ///
 #[cfg(test)]
@@ -230,7 +248,9 @@ mod tests {
     use cosmwasm_std::testing::{mock_env, mock_info};
     use cosmwasm_std::{CosmosMsg, from_binary};
     use provwasm_mocks::mock_dependencies;
-    use provwasm_std::{AttributeValueType, NameMsgParams, ProvenanceMsgParams, AttributeMsgParams};
+    use provwasm_std::{AttributeValueType, NameMsgParams, ProvenanceMsgParams, AttributeMsgParams, MarkerMsgParams};
+
+    const DEFAULT_FEE_AMOUNT: &str = "10000000000";
 
     #[test]
     fn valid_init() {
@@ -281,9 +301,8 @@ mod tests {
         let m_info = mock_info("somedude", &[]);
         let res = do_registration(deps.as_mut(), m_info.clone(), "mycoolname".into()).unwrap();
 
-        // Ensure we have the attribute message
-        assert_eq!(res.messages.len(), 1);
-
+        // Ensure we have the attribute message and the fee message
+        assert_eq!(res.messages.len(), 2);
         res.messages.into_iter().for_each(|msg| match msg.msg {
             CosmosMsg::Custom(ProvenanceMsg { params, .. }) => {
                 match params {
@@ -291,6 +310,10 @@ mod tests {
                         assert_eq!(name, "wallet.pb");
                         assert_eq!(value, to_binary("mycoolname".into()).unwrap());
                         assert_eq!(value_type, AttributeValueType::String)
+                    }
+                    // TODO: The rest of this test, but I'm tired from all the flail
+                    ProvenanceMsgParams::Marker(MarkerMsgParams::TransferMarkerCoins { coin, to, from }) => {
+                        assert_eq!(coin.amount.u128(), fee_amount_from_string(&DEFAULT_FEE_AMOUNT.to_string()).unwrap());
                     }
                     _ => panic!("unexpected provenance message type")
                 }
@@ -409,7 +432,7 @@ mod tests {
             info,
             InitMsg {
                 name: "wallet.pb".into(),
-                fee_amount: "10000000000".into(),
+                fee_amount: DEFAULT_FEE_AMOUNT.into(),
                 fee_collection_address: "tp123".into(),
             }
         )

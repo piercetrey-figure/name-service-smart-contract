@@ -1,1 +1,1 @@
-pub const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const FEE_DENOMINATION: &str = "nhash";
