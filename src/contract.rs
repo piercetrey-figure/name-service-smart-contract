@@ -109,7 +109,7 @@ fn try_query_by_address(deps: Deps, address: String) -> StdResult<Binary> {
     let attribute_container: Attributes = match try_query_attributes(deps, validated_address, registrar_name) {
         Ok(attributes) => attributes,
         Err(e) => {
-            return std_err_result(format!("failed to lookup account by address [{}]: {:?}", address.clone(), e));
+            return std_err_result(format!("failed to lookup account by address [{}]: {:?}", address, e));
         }
     };
     // Deserialize all names from their binary-encoded values to the source strings
@@ -164,11 +164,15 @@ fn try_register(
 ) -> Result<Response<ProvenanceMsg>, ContractError> {
     let config = config(deps.storage).load()?;
 
+    let name_bin = match to_binary(&name) {
+        Ok(bin) => bin,
+        Err(e) => { return Err(ContractError::NameSerializationFailure { cause: e }); },
+    };
+
     let add_attribute_message = add_attribute(
         info.sender.clone(),
         config.name,
-        // TODO: Handle binary deserialization errors gracefully instead of going ham like this
-        to_binary(&name.clone()).unwrap(),
+        name_bin,
         provwasm_std::AttributeValueType::String
     )?;
 
@@ -196,7 +200,7 @@ fn try_register(
 fn verify_no_matching_name(name: &String, meta: &Bucket<NameMeta>) -> Result<String, ContractError> {
     // If the load doesn't error out, that means it found the input name
     if meta.load(name.as_bytes()).is_ok() {
-        Err(ContractError::NameRegistered { msg: format!("name [{}] is already registered", name) })
+        Err(ContractError::NameRegistered { name: name.clone() })
     } else {
         Ok("name not found".into())
     }
@@ -312,8 +316,8 @@ mod tests {
         // Try a duplicate request
         let rejected = do_registration(deps.as_mut(), m_info.clone(), "mycoolname".into()).unwrap_err();
         match rejected {
-            ContractError::NameRegistered { msg } => {
-                assert_eq!(msg, "name [mycoolname] is already registered")
+            ContractError::NameRegistered { name } => {
+                assert_eq!("mycoolname".to_string(), name);
             },
             _ => panic!("unexpected error for proposed duplicate message"),
         }
@@ -393,13 +397,11 @@ mod tests {
     /// Driver for multiple instantiate types, on the chance that different defaults are needed
     enum InstArgs<'a> {
         Basic { deps: DepsMut<'a> },
-        WithInfo { deps: DepsMut<'a>, info: MessageInfo },
     }
 
     fn test_instantiate(inst: InstArgs) -> Result<Response<ProvenanceMsg>, StdError> {
         let (deps, info) = match inst {
             InstArgs::Basic { deps } => (deps, mock_info("admin", &[])),
-            InstArgs::WithInfo { deps, info } => (deps, info),
         };
         instantiate(
             deps,

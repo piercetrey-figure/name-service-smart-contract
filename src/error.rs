@@ -11,8 +11,12 @@ pub enum ContractError {
     // Add any other custom errors you like here.
     // Look at https://docs.rs/thiserror/1.0.21/thiserror/ for details.
 
-    #[error("Name is already registered")]
-    NameRegistered { msg: String },
+    #[error("Name [{name:?}] is already registered")]
+    // The msg param is strictly for internal testing
+    NameRegistered { name: String },
+
+    #[error("Name serialization failed due to {cause:?}")]
+    NameSerializationFailure { cause: StdError },
 
     #[error("Name not found")]
     NameNotFound,
