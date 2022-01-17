@@ -1,6 +1,6 @@
-use cosmwasm_std::{Addr, Binary, Deps, DepsMut, Env, from_binary, MessageInfo, Response, StdError, StdResult, to_binary};
+use cosmwasm_std::{Addr, BankMsg, Binary, coin, CosmosMsg, Deps, DepsMut, Env, from_binary, MessageInfo, Response, StdError, StdResult, to_binary};
 use cosmwasm_storage::Bucket;
-use provwasm_std::{NameBinding, ProvenanceMsg, add_attribute, bind_name, Attributes, Attribute, ProvenanceQuerier, transfer_marker_coins};
+use provwasm_std::{NameBinding, ProvenanceMsg, add_attribute, bind_name, Attributes, Attribute, ProvenanceQuerier};
 use crate::contract_info::FEE_DENOMINATION;
 
 use crate::error::{ContractError, std_err_result};
@@ -138,8 +138,6 @@ fn deserialize_name_from_attribute(attribute: &Attribute) -> String {
 ///
 /// EXECUTE SECTION
 ///
-/// TODO: Charge fees for registrations
-///
 pub fn execute(
     deps: DepsMut,
     _env: Env,
@@ -182,13 +180,14 @@ fn try_register(
         provwasm_std::AttributeValueType::String
     )?;
 
-    // Don't forget to charge the fee for the name
-    let fee_charge_message = transfer_marker_coins(
-        fee_amount_from_string(&config.fee_amount)?,
-        FEE_DENOMINATION.to_string(),
-        deps.api.addr_validate(&config.fee_collection_address)?,
-        info.sender.clone(),
-    )?;
+    // Pull the fee amount from the sender for name registration
+    let fee_charge_message = CosmosMsg::Bank(BankMsg::Send {
+        // The fee collection address is validated on contract instantiation, so there's no need to
+        // define custom error messages here
+        to_address: deps.api.addr_validate(&config.fee_collection_address)?.into(),
+        // The same goes for the fee_amount - it is guaranteed to pass this check
+        amount: vec!(coin(fee_amount_from_string(&config.fee_amount)?, FEE_DENOMINATION)),
+    });
 
     // Construct and store a NameMeta to the internal bucket.  This is important, because this
     // registry ensures duplicates names cannot be added, as well as allow addresses to be looked
@@ -248,7 +247,7 @@ mod tests {
     use cosmwasm_std::testing::{mock_env, mock_info};
     use cosmwasm_std::{CosmosMsg, from_binary};
     use provwasm_mocks::mock_dependencies;
-    use provwasm_std::{AttributeValueType, NameMsgParams, ProvenanceMsgParams, AttributeMsgParams, MarkerMsgParams};
+    use provwasm_std::{AttributeValueType, NameMsgParams, ProvenanceMsgParams, AttributeMsgParams};
 
     const DEFAULT_FEE_AMOUNT: &str = "10000000000";
 
@@ -296,7 +295,11 @@ mod tests {
         let mut deps = mock_dependencies(&[]);
 
         // Create config state
-        test_instantiate(InstArgs::Basic { deps: deps.as_mut() }).unwrap();
+        test_instantiate(InstArgs::FeeParams {
+            deps: deps.as_mut(),
+            fee_amount: "150",
+            fee_collection_address: "no-u",
+        }).unwrap();
 
         let m_info = mock_info("somedude", &[]);
         let res = do_registration(deps.as_mut(), m_info.clone(), "mycoolname".into()).unwrap();
@@ -311,12 +314,15 @@ mod tests {
                         assert_eq!(value, to_binary("mycoolname".into()).unwrap());
                         assert_eq!(value_type, AttributeValueType::String)
                     }
-                    // TODO: The rest of this test, but I'm tired from all the flail
-                    ProvenanceMsgParams::Marker(MarkerMsgParams::TransferMarkerCoins { coin, to, from }) => {
-                        assert_eq!(coin.amount.u128(), fee_amount_from_string(&DEFAULT_FEE_AMOUNT.to_string()).unwrap());
-                    }
                     _ => panic!("unexpected provenance message type")
                 }
+            }
+            CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
+                assert_eq!("no-u", to_address);
+                assert_eq!(1, amount.len(), "Only one coin should be specified in the fee transfer message");
+                let transferred_coin = amount.first().expect("Expected the first element of the coin transfer to be accessible");
+                assert_eq!(transferred_coin.amount.u128(), fee_amount_from_string(&"150".into()).unwrap());
+                assert_eq!(transferred_coin.denom.as_str(), FEE_DENOMINATION);
             }
             _ => panic!("unexpected message type"),
         });
@@ -420,20 +426,22 @@ mod tests {
     /// Driver for multiple instantiate types, on the chance that different defaults are needed
     enum InstArgs<'a> {
         Basic { deps: DepsMut<'a> },
+        FeeParams { deps: DepsMut<'a>, fee_amount: &'a str, fee_collection_address: &'a str },
     }
 
     fn test_instantiate(inst: InstArgs) -> Result<Response<ProvenanceMsg>, StdError> {
-        let (deps, info) = match inst {
-            InstArgs::Basic { deps } => (deps, mock_info("admin", &[])),
+        let (deps, fee_amount, fee_address) = match inst {
+            InstArgs::Basic { deps } => (deps, DEFAULT_FEE_AMOUNT, "tp123"),
+            InstArgs::FeeParams { deps, fee_amount, fee_collection_address } => (deps, fee_amount, fee_collection_address),
         };
         instantiate(
             deps,
             mock_env(),
-            info,
+            mock_info("admin", &[]),
             InitMsg {
                 name: "wallet.pb".into(),
-                fee_amount: DEFAULT_FEE_AMOUNT.into(),
-                fee_collection_address: "tp123".into(),
+                fee_amount: fee_amount.into(),
+                fee_collection_address: fee_address.into(),
             }
         )
     }
