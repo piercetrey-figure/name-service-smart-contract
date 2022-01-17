@@ -1,13 +1,11 @@
 use cosmwasm_std::{BankMsg, Binary, coin, CosmosMsg, Deps, DepsMut, Env, from_binary, MessageInfo, Response, StdError, StdResult, to_binary};
 use cosmwasm_storage::Bucket;
 use provwasm_std::{NameBinding, ProvenanceMsg, add_attribute, bind_name, Attributes, Attribute, ProvenanceQuerier};
-use crate::contract_info::FEE_DENOMINATION;
+use crate::contract_info::{FEE_DENOMINATION, MIN_FEE_AMOUNT};
 
 use crate::error::{ContractError, std_err_result};
 use crate::msg::{ExecuteMsg, InitMsg, MigrateMsg, NameResponse, QueryMsg};
 use crate::state::{NameMeta, State, config, config_read, meta, meta_read};
-
-const MIN_FEE_AMOUNT: u128 = 0;
 
 ///
 /// INSTANTIATION SECTION
