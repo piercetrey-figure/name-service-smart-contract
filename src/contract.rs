@@ -1,4 +1,4 @@
-use cosmwasm_std::{Addr, BankMsg, Binary, coin, CosmosMsg, Deps, DepsMut, Env, from_binary, MessageInfo, Response, StdError, StdResult, to_binary};
+use cosmwasm_std::{BankMsg, Binary, coin, CosmosMsg, Deps, DepsMut, Env, from_binary, MessageInfo, Response, StdError, StdResult, to_binary};
 use cosmwasm_storage::Bucket;
 use provwasm_std::{NameBinding, ProvenanceMsg, add_attribute, bind_name, Attributes, Attribute, ProvenanceQuerier};
 use crate::contract_info::FEE_DENOMINATION;
@@ -246,7 +246,7 @@ mod tests {
 
     use super::*;
     use cosmwasm_std::testing::{mock_env, mock_info};
-    use cosmwasm_std::{CosmosMsg, from_binary};
+    use cosmwasm_std::{Addr, CosmosMsg, from_binary};
     use provwasm_mocks::mock_dependencies;
     use provwasm_std::{AttributeValueType, NameMsgParams, ProvenanceMsgParams, AttributeMsgParams};
 
