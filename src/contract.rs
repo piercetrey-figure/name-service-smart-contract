@@ -101,7 +101,8 @@ fn try_query_by_address(deps: Deps, address: String) -> StdResult<Binary> {
         }
     };
     // Check for the registered name inside the attributes of the target address
-    let attribute_container: Attributes = match try_query_attributes(deps, validated_address, registrar_name) {
+    let attribute_container: Attributes = match ProvenanceQuerier::new(&deps.querier)
+        .get_attributes(validated_address, Some(registrar_name)) {
         Ok(attributes) => attributes,
         Err(e) => {
             return std_err_result(format!("failed to lookup account by address [{}]: {:?}", address, e));
@@ -118,11 +119,7 @@ fn try_query_by_address(deps: Deps, address: String) -> StdResult<Binary> {
     Ok(response_bin)
 }
 
-fn try_query_attributes(deps: Deps, address: Addr, name: String) -> StdResult<Attributes> {
-    let querier = ProvenanceQuerier::new(&deps.querier);
-    return querier.get_attributes(address, Some(name));
-}
-
+/// Creates a NameResponse from an Attribute module response. Isolated for unit testing.
 fn pack_response_from_attributes(attributes: Attributes) -> StdResult<Binary> {
     let names = attributes.attributes
         .iter()
@@ -131,6 +128,8 @@ fn pack_response_from_attributes(attributes: Attributes) -> StdResult<Binary> {
     to_binary(&NameResponse::new(attributes.address.into_string(), names))
 }
 
+/// Simple pass-through to convert a binary response from the Attribute module to a usable String.
+/// Isolated for unit testing.
 fn deserialize_name_from_attribute(attribute: &Attribute) -> String {
     from_binary::<String>(&attribute.value).expect("name deserialization failed")
 }
@@ -204,6 +203,8 @@ fn try_register(
     )
 }
 
+/// Ensures the given name by the caller is not currently registered in the meta bucket. If it is,
+/// returns an error indicating such.  Isolated to a function for readability.
 fn verify_no_matching_name(name: &String, meta: &Bucket<NameMeta>) -> Result<String, ContractError> {
     // If the load doesn't error out, that means it found the input name
     if meta.load(name.as_bytes()).is_ok() {
@@ -391,13 +392,8 @@ mod tests {
             mock_env(),
             QueryMsg::QueryNamesByAddress { address: "admin".into() },
         ).unwrap();
-        let _name_response: NameResponse = from_binary(&name_response_binary)
+        from_binary(&name_response_binary)
             .expect("Expected the response to correctly deserialize to a NameResp value");
-        // TODO: Figure out how to simulate the name registration.  This currently doesn't work
-        // TODO: because the execution phase doesn't actually execute the name association portion.
-        // TODO: On the bright side, I was able to test this against my localnet and it WORKS!
-        // assert_eq!(address.to_string(), name_response.address, "Expected the name response to contain the target address");
-        // assert_eq!(1, name_response.names.len(), "Expected the name response to have a single name in its name payload");
     }
 
     /// Helper to build an Attribute without having to do all the un-fun stuff repeatedly
@@ -429,6 +425,8 @@ mod tests {
         FeeParams { deps: DepsMut<'a>, fee_amount: &'a str, fee_collection_address: &'a str },
     }
 
+    /// Helper to instantiate the contract without being forced to pass all params, are most are
+    /// generally unneeded.
     fn test_instantiate(inst: InstArgs) -> Result<Response<ProvenanceMsg>, StdError> {
         let (deps, fee_amount, fee_address) = match inst {
             InstArgs::Basic { deps } => (deps, DEFAULT_FEE_AMOUNT, "tp123"),
