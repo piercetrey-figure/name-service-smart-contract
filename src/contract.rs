@@ -392,7 +392,7 @@ mod tests {
             mock_env(),
             QueryMsg::QueryNamesByAddress { address: "admin".into() },
         ).unwrap();
-        from_binary(&name_response_binary)
+        from_binary::<NameResponse>(&name_response_binary)
             .expect("Expected the response to correctly deserialize to a NameResp value");
     }
 
