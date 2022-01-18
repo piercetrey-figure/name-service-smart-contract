@@ -1,4 +1,4 @@
-use cosmwasm_std::{StdError, StdResult};
+use cosmwasm_std::{StdError, StdResult, Uint128};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -20,6 +20,15 @@ pub enum ContractError {
 
     #[error("Name not found")]
     NameNotFound,
+
+    #[error("No nhash amount provided during name registration")]
+    NoFundsProvidedForRegistration,
+
+    #[error("Non nhash coin provided for transaction {types:?}")]
+    InvalidFundsProvided { types: Vec<String> },
+
+    #[error("Insufficient funds provided for name registration. Provided {amount_provided:?} but required {amount_required:?}")]
+    InsufficientFundsProvided { amount_provided: Uint128, amount_required: Uint128 },
     
     #[error("Invalid fields: {fields:?}")]
     InvalidFields { fields: Vec<String> },

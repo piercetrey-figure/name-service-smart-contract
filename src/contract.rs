@@ -1,4 +1,4 @@
-use cosmwasm_std::{BankMsg, Binary, coin, CosmosMsg, Deps, DepsMut, Env, from_binary, MessageInfo, Response, StdError, StdResult, to_binary};
+use cosmwasm_std::{Api, BankMsg, Binary, coin, CosmosMsg, Deps, DepsMut, Env, from_binary, MessageInfo, Response, StdError, StdResult, to_binary};
 use cosmwasm_storage::Bucket;
 use provwasm_std::{NameBinding, ProvenanceMsg, add_attribute, bind_name, Attributes, Attribute, ProvenanceQuerier};
 use crate::contract_info::{FEE_DENOMINATION, MIN_FEE_AMOUNT};
@@ -172,33 +172,36 @@ fn try_register(
     // Construct the new attribute message for dispatch
     let add_attribute_message = add_attribute(
         info.sender.clone(),
-        config.name,
+        config.clone().name,
         name_bin,
         provwasm_std::AttributeValueType::String
     )?;
 
-    // Pull the fee amount from the sender for name registration
-    let fee_charge_message = CosmosMsg::Bank(BankMsg::Send {
-        // The fee collection address is validated on contract instantiation, so there's no need to
-        // define custom error messages here
-        to_address: deps.api.addr_validate(&config.fee_collection_address)?.into(),
-        // The same goes for the fee_amount - it is guaranteed to pass this check
-        amount: vec!(coin(fee_amount_from_string(&config.fee_amount)?, FEE_DENOMINATION)),
-    });
+    // Validate that fees are payable and correctly constructed. Errors are properly packaged within
+    // the target function, which makes this a perfect candidate for bubbling up via the ? operator
+    let (fee_charge_message, fee_refund_message, fee_refund_amount) =
+        validate_fee_params_get_messages(deps.api, &info, &config)?;
 
     // Construct and store a NameMeta to the internal bucket.  This is important, because this
     // registry ensures duplicates names cannot be added, as well as allow addresses to be looked
     // up by name
-    let name_meta = NameMeta { name: name.clone(), address: info.sender.into_string(), };
+    let name_meta = NameMeta { name: name.clone(), address: info.clone().sender.into_string(), };
     meta_storage.save(name.clone().as_bytes(), &name_meta)?;
 
     // Return a response that will dispatch the marker messages and emit events.
-    Ok(Response::new()
+    let mut response = Response::new()
         .add_message(add_attribute_message)
         .add_message(fee_charge_message)
         .add_attribute("action", "name_register")
-        .add_attribute("name", name)
-    )
+        .add_attribute("name", name);
+
+    // If a fee refund must occur, append the constructed message as well as an attribute explicitly
+    // detailing the amount of "denom" refunded
+    if let Some(refund_message) = fee_refund_message {
+        response = response.add_message(refund_message)
+            .add_attribute("fee_refund", format!("{}{}", fee_refund_amount, FEE_DENOMINATION));
+    }
+    Ok(response)
 }
 
 /// Ensures the given name by the caller is not currently registered in the meta bucket. If it is,
@@ -210,6 +213,86 @@ fn verify_no_matching_name(name: &String, meta: &Bucket<NameMeta>) -> Result<Str
     } else {
         Ok("name not found".into())
     }
+}
+
+/// Verifies that funds provided are correct and enough for a fee charge, and then constructs
+/// provenance messages that will provide the correct output during the name registration process.
+///
+/// The validation performed is:
+/// - Ensure no funds provided are of an incorrect denomination.
+/// - Ensure that the provided funds sent are >= the fee charge for transactions
+/// - Ensure that, if more funds are provided than are needed by for the fee, that the excess is caught and refunded
+///
+/// Returns:
+/// - 1: The message to allocate provided funds to the fee collection account
+/// - 2: The message to refund the sender with any excess fees (None if the funds provided are exactly equal to the amount of fee required)
+/// - 3: The amount refunded.  Will be zero if the perfect fund amount if sent.
+/// - Various errors if funds provided are not enough or incorrectly formatted
+fn validate_fee_params_get_messages(
+    api: &dyn Api,
+    info: &MessageInfo,
+    config: &State,
+) -> Result<(CosmosMsg<ProvenanceMsg>, Option<CosmosMsg<ProvenanceMsg>>, u128), ContractError> {
+    // Determine if any funds sent are not of the correct denom
+    let invalid_funds = info.funds.iter()
+        .filter(|coin| coin.denom != FEE_DENOMINATION)
+        .map(|coin| coin.denom.clone())
+        .collect::<Vec<String>>();
+
+    // If any funds are found that do not match the fee denom, exit prematurely to prevent
+    // contract from siphoning random funds for no reason
+    if invalid_funds.len() > 0 {
+        return Err(ContractError::InvalidFundsProvided { types: invalid_funds });
+    }
+
+    // Pull the nhash sent by verifying that only one fund sent is of the nhash variety
+    let nhash_sent = match info.clone().funds.into_iter().find(|coin| coin.denom == FEE_DENOMINATION) {
+        Some(coin) => coin.amount,
+        None => {
+            return Err(ContractError::NoFundsProvidedForRegistration);
+        }
+    };
+
+    let nhash_fee_amount = fee_amount_from_string(&config.fee_amount)?;
+
+    // If the amount provided is too low, reject the request because the fee cannot be paid
+    if nhash_sent.u128() < nhash_fee_amount {
+        return Err(ContractError::InsufficientFundsProvided {
+            amount_provided: nhash_sent,
+            amount_required: nhash_fee_amount.into(),
+        })
+    }
+
+    // Pull the fee amount from the sender for name registration
+    let fee_charge_message = CosmosMsg::Bank(BankMsg::Send {
+        // The fee collection address is validated on contract instantiation, so there's no need to
+        // define custom error messages here
+        to_address: api.addr_validate(&config.fee_collection_address)?.into(),
+        // The same goes for the fee_amount - it is guaranteed to pass this check
+        amount: vec!(coin(nhash_fee_amount, FEE_DENOMINATION)),
+    });
+
+    // The refund amount is == the total nhash sent - fee charged
+    let fee_refund_amount = nhash_sent.u128() - nhash_fee_amount;
+
+    // If more than the fee amount is sent, then respond with an additional message that sends the
+    // excess back into the sender's account
+    let fee_refund_message = if fee_refund_amount > 0 {
+        Some(
+            CosmosMsg::Bank(BankMsg::Send {
+                to_address: info.sender.clone().into(),
+                amount: vec!(coin(fee_refund_amount, FEE_DENOMINATION)),
+            })
+        )
+    } else {
+        None
+    };
+
+    Ok((
+        fee_charge_message,
+        fee_refund_message,
+        fee_refund_amount,
+    ))
 }
 
 ///
@@ -248,7 +331,7 @@ mod tests {
     use provwasm_mocks::mock_dependencies;
     use provwasm_std::{AttributeValueType, NameMsgParams, ProvenanceMsgParams, AttributeMsgParams};
 
-    const DEFAULT_FEE_AMOUNT: &str = "10000000000";
+    const DEFAULT_FEE_AMOUNT: u128 = 10000000000;
 
     #[test]
     fn valid_init() {
@@ -296,11 +379,11 @@ mod tests {
         // Create config state
         test_instantiate(InstArgs::FeeParams {
             deps: deps.as_mut(),
-            fee_amount: "150",
+            fee_amount: 150,
             fee_collection_address: "no-u",
         }).unwrap();
 
-        let m_info = mock_info("somedude", &[]);
+        let m_info = mock_info("somedude", &vec![coin(150, "nhash")]);
         let res = do_registration(deps.as_mut(), m_info.clone(), "mycoolname".into()).unwrap();
 
         // Ensure we have the attribute message and the fee message
@@ -332,13 +415,66 @@ mod tests {
     }
 
     #[test]
+    fn test_fee_overage_is_refunded() {
+        let mut deps = mock_dependencies(&[]);
+
+        test_instantiate(InstArgs::FeeParams {
+            deps: deps.as_mut(),
+            fee_amount: 150,
+            fee_collection_address: "fee_bucket",
+        }).unwrap();
+
+        // Send 50 more than the required fee amount
+        let m_info = mock_info("sender_wallet", &vec![coin(200, FEE_DENOMINATION)]);
+
+        let response = do_registration(deps.as_mut(), m_info, "thebestnameever".into()).unwrap();
+
+        assert_eq!(response.messages.len(), 3, "three messages should be returned with an excess fee");
+
+        response.messages.into_iter().for_each(|msg| match msg.msg {
+            CosmosMsg::Custom(ProvenanceMsg { params, .. }) => {
+                match params {
+                    ProvenanceMsgParams::Attribute(AttributeMsgParams::AddAttribute { name, value, value_type, .. }) => {
+                        assert_eq!(name, "wallet.pb");
+                        assert_eq!(value, to_binary("thebestnameever".into()).unwrap());
+                        assert_eq!(value_type, AttributeValueType::String)
+                    }
+                    _ => panic!("unexpected provenance message type")
+                }
+            },
+            CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
+                assert_eq!(1, amount.len(), "expected the sent amount vector of coins to always only have one entry");
+                let coin_amount_sent = amount.into_iter().find(|coin| coin.denom == FEE_DENOMINATION)
+                    .expect("there should be an nhash coin entry").amount.u128();
+                match to_address.as_str() {
+                    "fee_bucket" => {
+                        assert_eq!(coin_amount_sent, 150, "expected the fee bucket to be sent the instantiated fee amount");
+                    },
+                    "sender_wallet" => {
+                        assert_eq!(coin_amount_sent, 50, "expected the sender to be refunded the excess funds they added");
+                    }
+                    _ => panic!("unexpected to_address encountered"),
+                };
+            },
+            _ => panic!("unexpected message type"),
+        });
+
+        assert_eq!(3, response.attributes.len(), "expected three attributes to be added when a refund occurs");
+        response.attributes.iter().find(|attr| attr.key.as_str() == "action").unwrap();
+        let name_attr = response.attributes.iter().find(|attr| attr.key.as_str() == "name").unwrap();
+        assert_eq!(name_attr.value.as_str(), "thebestnameever");
+        let excess_funds_attr = response.attributes.iter().find(|attr| attr.key.as_str() == "fee_refund").unwrap();
+        assert_eq!(excess_funds_attr.value.as_str(), "50nhash");
+    }
+
+    #[test]
     fn test_duplicate_registrations_are_rejected() {
         // Create mocks
         let mut deps = mock_dependencies(&[]);
 
         // Create config state
         test_instantiate(InstArgs::Basic { deps: deps.as_mut() }).unwrap();
-        let m_info = mock_info("somedude", &[]);
+        let m_info = mock_info("somedude", &vec![coin(DEFAULT_FEE_AMOUNT, "nhash")]);
         // Do first execution to ensure the new name is in there
         do_registration(deps.as_mut(), m_info.clone(), "mycoolname".into()).unwrap();
         // Try a duplicate request
@@ -348,6 +484,38 @@ mod tests {
                 assert_eq!("mycoolname".to_string(), name);
             },
             _ => panic!("unexpected error for proposed duplicate message"),
+        };
+    }
+
+    #[test]
+    fn test_missing_fee_amount_for_registration() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::Basic { deps: deps.as_mut() }).unwrap();
+        // No fees provided in mock info - this should cause a rejection
+        let missing_all_fees_info = mock_info("theguy", &[]);
+        let rejected_no_coin = do_registration(deps.as_mut(), missing_all_fees_info.clone(), "newname".into()).unwrap_err();
+        assert!(matches!(rejected_no_coin, ContractError::NoFundsProvidedForRegistration));
+        let incorrect_denom_info = mock_info(
+            "theotherguy",
+            &vec![
+                // Send 3 different types of currencies that the contract is not expected to handle
+                coin(DEFAULT_FEE_AMOUNT, "nothash"),
+                coin(DEFAULT_FEE_AMOUNT, "fakecoin"),
+                coin(DEFAULT_FEE_AMOUNT, "dogecoin"),
+                // Provide the a correct value as well to ensure that the validation will reject all
+                // requests that include excess
+                coin(DEFAULT_FEE_AMOUNT, "nhash"),
+            ]
+        );
+        let rejected_incorrect_type_coin = do_registration(deps.as_mut(), incorrect_denom_info, "newname".into()).unwrap_err();
+        match rejected_incorrect_type_coin {
+            ContractError::InvalidFundsProvided { types } => {
+                assert_eq!(3, types.len(), "expected the three invalid types to be returned in the rejection");
+                types.iter().find(|coin_type| coin_type.as_str() == "nothash").unwrap();
+                types.iter().find(|coin_type| coin_type.as_str() == "fakecoin").unwrap();
+                types.iter().find(|coin_type| coin_type.as_str() == "dogecoin").unwrap();
+            }
+            _ => panic!("unexpected error encountered when providing invalid fund types"),
         }
     }
 
@@ -381,7 +549,7 @@ mod tests {
         // Create config state
         test_instantiate(InstArgs::Basic { deps: deps.as_mut() }).unwrap();
         let address = "registration_guy";
-        let mock_info = mock_info(&address, &[]);
+        let mock_info = mock_info(&address, &vec![coin(DEFAULT_FEE_AMOUNT, "nhash")]);
         let target_name = "bestnameever";
         // Drop the name into the system
         do_registration(deps.as_mut(), mock_info.clone(), target_name.into()).unwrap();
@@ -420,7 +588,7 @@ mod tests {
     /// Driver for multiple instantiate types, on the chance that different defaults are needed
     enum InstArgs<'a> {
         Basic { deps: DepsMut<'a> },
-        FeeParams { deps: DepsMut<'a>, fee_amount: &'a str, fee_collection_address: &'a str },
+        FeeParams { deps: DepsMut<'a>, fee_amount: u128, fee_collection_address: &'a str },
     }
 
     /// Helper to instantiate the contract without being forced to pass all params, are most are
@@ -436,7 +604,7 @@ mod tests {
             mock_info("admin", &[]),
             InitMsg {
                 name: "wallet.pb".into(),
-                fee_amount: fee_amount.into(),
+                fee_amount: fee_amount.to_string(),
                 fee_collection_address: fee_address.into(),
             }
         )
