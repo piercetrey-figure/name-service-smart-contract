@@ -481,6 +481,8 @@ mod tests {
             }
             _ => panic!("unexpected response message type"),
         });
+        let refund_attr = zero_fee_resp.attributes.into_iter().find(|attr| attr.key.as_str() == "fee_refund");
+        assert!(refund_attr.is_none(), "no refund should occur with no amount passed in");
     }
 
     #[test]
@@ -496,10 +498,17 @@ mod tests {
                 verify_add_attribute_result(params, "wallet.pb", "nametouse");
             }
             CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
+                assert_eq!(to_address.as_str(), "sender_wallet", "the recipient of the transaction should be the sender because all funds allocated were refunded");
                 let coin_amount_sent = validate_and_get_nhash_sent(amount);
+                assert_eq!(coin_amount_sent, 200, "all funds sent should be refunded");
             }
             _ => panic!("unexpected response message type"),
         });
+        let fee_refund_attr = refund_resp.attributes
+            .into_iter()
+            .find(|attr| attr.key.as_str() == "fee_refund")
+            .expect("the refunded fee amount should be added as an attribute");
+        assert_eq!(fee_refund_attr.value.as_str(), "200nhash", "expected the refund amount to be indicated as nhash");
     }
 
     #[test]
