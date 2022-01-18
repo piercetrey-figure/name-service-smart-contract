@@ -1,4 +1,4 @@
-use cosmwasm_std::{Api, BankMsg, Binary, coin, CosmosMsg, Deps, DepsMut, Env, from_binary, MessageInfo, Response, StdError, StdResult, to_binary};
+use cosmwasm_std::{Api, BankMsg, Binary, coin, CosmosMsg, Deps, DepsMut, Env, from_binary, MessageInfo, Response, StdError, StdResult, to_binary, Uint128};
 use cosmwasm_storage::Bucket;
 use provwasm_std::{NameBinding, ProvenanceMsg, add_attribute, bind_name, Attributes, Attribute, ProvenanceQuerier};
 use crate::contract_info::{FEE_DENOMINATION, MIN_FEE_AMOUNT};
@@ -191,9 +191,13 @@ fn try_register(
     // Return a response that will dispatch the marker messages and emit events.
     let mut response = Response::new()
         .add_message(add_attribute_message)
-        .add_message(fee_charge_message)
         .add_attribute("action", "name_register")
         .add_attribute("name", name);
+
+    // If a fee charge is requested, append it
+    if let Some(fee_message) = fee_charge_message {
+        response = response.add_message(fee_message);
+    }
 
     // If a fee refund must occur, append the constructed message as well as an attribute explicitly
     // detailing the amount of "denom" refunded
@@ -224,7 +228,7 @@ fn verify_no_matching_name(name: &String, meta: &Bucket<NameMeta>) -> Result<Str
 /// - Ensure that, if more funds are provided than are needed by for the fee, that the excess is caught and refunded
 ///
 /// Returns:
-/// - 1: The message to allocate provided funds to the fee collection account
+/// - 1: The message to allocate provided funds to the fee collection account (None if the fee collection amount is instantiated as zero with the contract)
 /// - 2: The message to refund the sender with any excess fees (None if the funds provided are exactly equal to the amount of fee required)
 /// - 3: The amount refunded.  Will be zero if the perfect fund amount if sent.
 /// - Various errors if funds provided are not enough or incorrectly formatted
@@ -232,7 +236,7 @@ fn validate_fee_params_get_messages(
     api: &dyn Api,
     info: &MessageInfo,
     config: &State,
-) -> Result<(CosmosMsg<ProvenanceMsg>, Option<CosmosMsg<ProvenanceMsg>>, u128), ContractError> {
+) -> Result<(Option<CosmosMsg<ProvenanceMsg>>, Option<CosmosMsg<ProvenanceMsg>>, u128), ContractError> {
     // Determine if any funds sent are not of the correct denom
     let invalid_funds = info.funds.iter()
         .filter(|coin| coin.denom != FEE_DENOMINATION)
@@ -245,15 +249,23 @@ fn validate_fee_params_get_messages(
         return Err(ContractError::InvalidFundsProvided { types: invalid_funds });
     }
 
+    let nhash_fee_amount = fee_amount_from_string(&config.fee_amount)?;
+
     // Pull the nhash sent by verifying that only one fund sent is of the nhash variety
     let nhash_sent = match info.clone().funds.into_iter().find(|coin| coin.denom == FEE_DENOMINATION) {
         Some(coin) => coin.amount,
         None => {
-            return Err(ContractError::NoFundsProvidedForRegistration);
+            // If fees are required, then a coin of type FEE_DENOMINATION should be sent and the
+            // absence of one is an error.  Otherwise, treat omission as purposeful definition of
+            // zero money fronted for a fee
+            if nhash_fee_amount > 0 {
+                return Err(ContractError::NoFundsProvidedForRegistration);
+            } else {
+                Uint128::zero()
+            }
         }
     };
 
-    let nhash_fee_amount = fee_amount_from_string(&config.fee_amount)?;
 
     // If the amount provided is too low, reject the request because the fee cannot be paid
     if nhash_sent.u128() < nhash_fee_amount {
@@ -264,13 +276,17 @@ fn validate_fee_params_get_messages(
     }
 
     // Pull the fee amount from the sender for name registration
-    let fee_charge_message = CosmosMsg::Bank(BankMsg::Send {
-        // The fee collection address is validated on contract instantiation, so there's no need to
-        // define custom error messages here
-        to_address: api.addr_validate(&config.fee_collection_address)?.into(),
-        // The same goes for the fee_amount - it is guaranteed to pass this check
-        amount: vec!(coin(nhash_fee_amount, FEE_DENOMINATION)),
-    });
+    let fee_charge_message = if nhash_fee_amount > 0 {
+        Some(
+            CosmosMsg::Bank(BankMsg::Send {
+                // The fee collection address is validated on contract instantiation, so there's no need to
+                // define custom error messages here
+                to_address: api.addr_validate(&config.fee_collection_address)?.into(),
+                // The same goes for the fee_amount - it is guaranteed to pass this check
+                amount: vec!(coin(nhash_fee_amount, FEE_DENOMINATION)),
+            })
+        )
+    } else { None };
 
     // The refund amount is == the total nhash sent - fee charged
     let fee_refund_amount = nhash_sent.u128() - nhash_fee_amount;
@@ -327,7 +343,7 @@ mod tests {
 
     use super::*;
     use cosmwasm_std::testing::{mock_env, mock_info};
-    use cosmwasm_std::{Addr, CosmosMsg, from_binary};
+    use cosmwasm_std::{Addr, Coin, CosmosMsg, from_binary};
     use provwasm_mocks::mock_dependencies;
     use provwasm_std::{AttributeValueType, NameMsgParams, ProvenanceMsgParams, AttributeMsgParams};
 
@@ -390,14 +406,7 @@ mod tests {
         assert_eq!(res.messages.len(), 2);
         res.messages.into_iter().for_each(|msg| match msg.msg {
             CosmosMsg::Custom(ProvenanceMsg { params, .. }) => {
-                match params {
-                    ProvenanceMsgParams::Attribute(AttributeMsgParams::AddAttribute { name, value, value_type, .. }) => {
-                        assert_eq!(name, "wallet.pb");
-                        assert_eq!(value, to_binary("mycoolname".into()).unwrap());
-                        assert_eq!(value_type, AttributeValueType::String)
-                    }
-                    _ => panic!("unexpected provenance message type")
-                }
+                verify_add_attribute_result(params, "wallet.pb", "mycoolname");
             }
             CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
                 assert_eq!("no-u", to_address);
@@ -433,19 +442,10 @@ mod tests {
 
         response.messages.into_iter().for_each(|msg| match msg.msg {
             CosmosMsg::Custom(ProvenanceMsg { params, .. }) => {
-                match params {
-                    ProvenanceMsgParams::Attribute(AttributeMsgParams::AddAttribute { name, value, value_type, .. }) => {
-                        assert_eq!(name, "wallet.pb");
-                        assert_eq!(value, to_binary("thebestnameever".into()).unwrap());
-                        assert_eq!(value_type, AttributeValueType::String)
-                    }
-                    _ => panic!("unexpected provenance message type")
-                }
+                verify_add_attribute_result(params, "wallet.pb", "thebestnameever");
             },
             CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
-                assert_eq!(1, amount.len(), "expected the sent amount vector of coins to always only have one entry");
-                let coin_amount_sent = amount.into_iter().find(|coin| coin.denom == FEE_DENOMINATION)
-                    .expect("there should be an nhash coin entry").amount.u128();
+                let coin_amount_sent = validate_and_get_nhash_sent(amount);
                 match to_address.as_str() {
                     "fee_bucket" => {
                         assert_eq!(coin_amount_sent, 150, "expected the fee bucket to be sent the instantiated fee amount");
@@ -465,6 +465,41 @@ mod tests {
         assert_eq!(name_attr.value.as_str(), "thebestnameever");
         let excess_funds_attr = response.attributes.iter().find(|attr| attr.key.as_str() == "fee_refund").unwrap();
         assert_eq!(excess_funds_attr.value.as_str(), "50nhash");
+    }
+
+    #[test]
+    fn test_zero_fee_allows_no_amounts() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::FeeParams { deps: deps.as_mut(), fee_amount: 0, fee_collection_address: "feebucket" }).unwrap();
+        // Send no coin with the request under the assumption that zero fee should allow this
+        let m_info = mock_info("senderwallet", &[]);
+        let zero_fee_resp = do_registration(deps.as_mut(), m_info, "nameofmine".into()).unwrap();
+        assert_eq!(1, zero_fee_resp.messages.len(), "only one message should be responded with because no fee occurred and no refund occurred");
+        zero_fee_resp.messages.into_iter().for_each(|msg| match msg.msg {
+            CosmosMsg::Custom(ProvenanceMsg { params, .. }) => {
+                verify_add_attribute_result(params, "wallet.pb", "nameofmine");
+            }
+            _ => panic!("unexpected response message type"),
+        });
+    }
+
+    #[test]
+    fn test_zero_fee_and_fee_overage_provided_results_in_full_refund() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::FeeParams { deps: deps.as_mut(), fee_amount: 0, fee_collection_address: "feebucket" }).unwrap();
+        // Send a coin overage of nhash to ensure all of it gets returned as a refund
+        let m_info = mock_info("sender_wallet", &vec![coin(200, FEE_DENOMINATION)]);
+        let refund_resp = do_registration(deps.as_mut(), m_info, "nametouse".into()).unwrap();
+        assert_eq!(2, refund_resp.messages.len(), "two messages should be responded with when a fee is not charged, but a refund is made");
+        refund_resp.messages.into_iter().for_each(|msg| match msg.msg {
+            CosmosMsg::Custom(ProvenanceMsg { params, .. }) => {
+                verify_add_attribute_result(params, "wallet.pb", "nametouse");
+            }
+            CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
+                let coin_amount_sent = validate_and_get_nhash_sent(amount);
+            }
+            _ => panic!("unexpected response message type"),
+        });
     }
 
     #[test]
@@ -608,5 +643,30 @@ mod tests {
                 fee_collection_address: fee_address.into(),
             }
         )
+    }
+
+    /// Helper to verify that a name was properly registered under the appropriate registrar.
+    fn verify_add_attribute_result(params: ProvenanceMsgParams, expected_registrar: &str, expected_result_name: &str) {
+        match params {
+            ProvenanceMsgParams::Attribute(AttributeMsgParams::AddAttribute { name, value, value_type, .. }) => {
+                assert_eq!(name, expected_registrar);
+                assert_eq!(
+                    from_binary::<String>(&value).expect("unable to deserialize name response binary"),
+                    expected_result_name.to_string(),
+                );
+                assert_eq!(value_type, AttributeValueType::String)
+            }
+            _ => panic!("unexpected provenance message type")
+        }
+    }
+
+    /// Verifies that the amount vector received via a CosmosMsg::BankMsg::Send is the correct
+    /// enclosure: One coin result indicating an amount of nhash sent.
+    fn validate_and_get_nhash_sent(amount: Vec<Coin>) -> u128 {
+        assert_eq!(1, amount.len(), "expected the amount sent to be a single value, indicating one nhash coin");
+        amount.into_iter().find(|coin| coin.denom == FEE_DENOMINATION)
+            .expect(format!("there should be a coin entry of type [{}]", FEE_DENOMINATION).as_str())
+            .amount
+            .u128()
     }
 }
