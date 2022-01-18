@@ -1,4 +1,3 @@
-use cosmwasm_std::{Binary, Addr, Coin, Uint128};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +23,8 @@ pub enum ExecuteMsg {
 #[serde(rename_all = "snake_case")]
 pub enum QueryMsg {
     QueryRequest {},
-    ResolveName { name: String },
+    QueryAddressByName { name: String },
+    QueryNamesByAddress { address: String },
 }
 
 /// A type alias for contract state.
@@ -34,4 +34,16 @@ pub type QueryResponse = State;
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct MigrateMsg {
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct NameResponse {
+    pub address: String,
+    pub names: Vec<String>,
+}
+impl NameResponse {
+    pub fn new(address: String, names: Vec<String>) -> NameResponse {
+        NameResponse { address, names, }
+    }
 }
