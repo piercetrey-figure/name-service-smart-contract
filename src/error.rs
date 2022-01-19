@@ -27,6 +27,9 @@ pub enum ContractError {
     #[error("Non nhash coin provided for transaction {types:?}")]
     InvalidFundsProvided { types: Vec<String> },
 
+    #[error("Name has invalid format. Names should be all lowercase with no spaces or special characters. Name used: [{name}]")]
+    InvalidNameFormat { name: String },
+
     #[error("Insufficient funds provided for name registration. Provided {amount_provided:?} but required {amount_required:?}")]
     InsufficientFundsProvided { amount_provided: Uint128, amount_required: Uint128 },
     

@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::state::State;
+use crate::state::{NameMeta, State};
 
 /// A message sent to initialize the contract state.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -25,6 +25,7 @@ pub enum QueryMsg {
     QueryRequest {},
     QueryAddressByName { name: String },
     QueryNamesByAddress { address: String },
+    SearchForNames { search: String },
 }
 
 /// A type alias for contract state.
@@ -45,5 +46,17 @@ pub struct NameResponse {
 impl NameResponse {
     pub fn new(address: String, names: Vec<String>) -> NameResponse {
         NameResponse { address, names, }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct NameSearchResponse {
+    pub search: String,
+    pub names: Vec<NameMeta>,
+}
+impl NameSearchResponse {
+    pub fn new(search: String, names: Vec<NameMeta>) -> NameSearchResponse {
+        NameSearchResponse { search, names, }
     }
 }

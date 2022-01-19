@@ -1,10 +1,11 @@
-use cosmwasm_std::{Api, BankMsg, Binary, coin, CosmosMsg, Deps, DepsMut, Env, from_binary, MessageInfo, Response, StdError, StdResult, to_binary, Uint128};
+use cosmwasm_std::{Api, BankMsg, Binary, coin, CosmosMsg, Deps, DepsMut, Env, from_binary, MessageInfo, Order, Response, StdError, StdResult, to_binary, Uint128};
 use cosmwasm_storage::Bucket;
 use provwasm_std::{NameBinding, ProvenanceMsg, add_attribute, bind_name, Attributes, Attribute, ProvenanceQuerier};
-use crate::contract_info::{FEE_DENOMINATION, MIN_FEE_AMOUNT};
+use regex::Regex;
+use crate::contract_info::{FEE_DENOMINATION, MAX_NAME_SEARCH_RESULTS, MIN_FEE_AMOUNT};
 
 use crate::error::{ContractError, std_err_result};
-use crate::msg::{ExecuteMsg, InitMsg, MigrateMsg, NameResponse, QueryMsg};
+use crate::msg::{ExecuteMsg, InitMsg, MigrateMsg, NameResponse, NameSearchResponse, QueryMsg};
 use crate::state::{NameMeta, State, config, config_read, meta, meta_read};
 
 ///
@@ -80,6 +81,7 @@ pub fn query(
             Ok(json)
         },
         QueryMsg::QueryNamesByAddress { address } => try_query_by_address(deps, address),
+        QueryMsg::SearchForNames { search } => search_for_names(deps, search),
     }
 }
 
@@ -132,6 +134,21 @@ fn deserialize_name_from_attribute(attribute: &Attribute) -> String {
     from_binary::<String>(&attribute.value).expect("name deserialization failed")
 }
 
+/// Scans the entire storage for the target name string by doing direct matches.
+/// Will only ever return a maximum of MAX_NAME_SEARCH_RESULTS.
+fn search_for_names(deps: Deps, search: String) -> StdResult<Binary> {
+    let meta_storage = meta_read(deps.storage);
+    let search_str = search.as_str();
+    let names = meta_storage.range(None, None, Order::Ascending)
+        .into_iter()
+        .filter(|element| element.is_ok())
+        .map(|element| element.unwrap().1)
+        .filter(|name_meta| name_meta.name.contains(search_str))
+        .take(MAX_NAME_SEARCH_RESULTS)
+        .collect();
+    to_binary(&NameSearchResponse { search: search.clone(), names })
+}
+
 ///
 /// EXECUTE SECTION
 ///
@@ -160,7 +177,7 @@ fn try_register(
 
     // Ensure the provided name has not yet been registered. Bubble up the error if the lookup
     // succeeds in finding the value
-    verify_no_matching_name(&name, &meta_storage)?;
+    validate_name(name.clone(), &meta_storage)?;
 
     // Serialize the proposed name as binary, allowing it to be sent via the ProvenanceClient as
     // a new attribute under the registrar
@@ -207,16 +224,20 @@ fn try_register(
     }
     Ok(response)
 }
-
-/// Ensures the given name by the caller is not currently registered in the meta bucket. If it is,
-/// returns an error indicating such.  Isolated to a function for readability.
-fn verify_no_matching_name(name: &String, meta: &Bucket<NameMeta>) -> Result<String, ContractError> {
+/// Validates that a name can be added.  Makes the following checks:
+/// - The name is not already registered. Core validation to ensure duplicate registrations cannot occur
+/// - The name is all lowercase and does not contain special characters. Ensures all names are easy to recognize.
+fn validate_name(name: String, meta: &Bucket<NameMeta>) -> Result<String, ContractError> {
     // If the load doesn't error out, that means it found the input name
     if meta.load(name.as_bytes()).is_ok() {
-        Err(ContractError::NameRegistered { name: name.clone() })
-    } else {
-        Ok("name not found".into())
+        return Err(ContractError::NameRegistered { name: name.clone() });
     }
+    // Ensures that the given name is all lowercase and has no special characters or spaces
+    let regex = Regex::new(r"^([\da-z]+)$").expect("Provided name validation regex is invalid");
+    if !regex.is_match(name.as_str()) {
+        return Err(ContractError::InvalidNameFormat { name });
+    }
+    Ok("successful validation".into())
 }
 
 /// Verifies that funds provided are correct and enough for a fee charge, and then constructs
@@ -604,6 +625,96 @@ mod tests {
         ).unwrap();
         from_binary::<NameResponse>(&name_response_binary)
             .expect("Expected the response to correctly deserialize to a NameResp value");
+    }
+
+    #[test]
+    fn test_invalid_name_format_scenarios() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::Basic { deps: deps.as_mut() }).unwrap();
+        let empty_bucket = meta(deps.as_mut().storage);
+        // Establish a decent set of non-alphanumeric characters to test against
+        let special_characters = vec![".", ",", "<", ">", "/", "?", ";", ":", "'", "\"", "[", "]", "{", "}", "-", "_", "+", "=", "(", ")", "*", "&", "^", "%", "$", "#", "@", "!", " ", "\\", "|"];
+        special_characters.into_iter().for_each(|character| {
+            let test_name = format!("name{}", character);
+            let response = validate_name(test_name.clone(), &empty_bucket).unwrap_err();
+            assert!(
+                matches!(response, ContractError::InvalidNameFormat { .. }),
+                "Expected the name {} to be rejected as an invalid name",
+                test_name,
+            );
+        });
+        let empty_name_response = validate_name("".into(), &empty_bucket).unwrap_err();
+        assert!(
+            matches!(empty_name_response, ContractError::InvalidNameFormat { .. }),
+            "Expected an empty name to be rejected as invalid input",
+        );
+        let uppercase_name_response = validate_name("A".into(), &empty_bucket).unwrap_err();
+        assert!(
+            matches!(uppercase_name_response, ContractError::InvalidNameFormat { .. }),
+            "Expected an uppercase name to be rejected as invalid input",
+        );
+        validate_name("a1".into(), &empty_bucket)
+            .expect("expected a name containing a number to be valid");
+    }
+
+    #[test]
+    fn test_search_for_names() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::Basic { deps: deps.as_mut() }).unwrap();
+        let mut names: Vec<String> = vec!["a".into(), "aa".into(), "ab".into(), "ac".into(), "test".into()];
+        // Add a ton of stuff prefixed with b to the array to simulate a fully-used name backend
+        for i in 0..1000 {
+            names.push(format!("b{}", i));
+        }
+        // Register all names and fail if anything doesn't result in a success
+        names.into_iter().for_each(|name| {
+            do_registration(
+                deps.as_mut(),
+                mock_info("fake_address", &vec![coin(DEFAULT_FEE_AMOUNT, FEE_DENOMINATION)]),
+                name.into(),
+            ).unwrap();
+        });
+        // Make the search functionality easy to re-use as a closure
+        let search = |search_param: &str| {
+            let result_bin = query(deps.as_ref(), mock_env(), QueryMsg::SearchForNames { search: search_param.into() })
+                .expect(format!("expected the name search to properly respond with binary for search input \"{}\"", search_param).as_str());
+            from_binary::<NameSearchResponse>(&result_bin)
+                .expect("expected binary deserialization to a NameSearchResposne to succeed")
+        };
+        // Verify that all the things added with "a" in them can be found
+        let name_result = search("a");
+        assert_eq!("a", name_result.search.as_str(), "expected the search value to reflect the input");
+        assert_eq!(4, name_result.names.len(), "all four results containing the letter \"a\" should be returned");
+        name_result.names.iter().find(|meta| meta.name == "a").expect("the value \"a\" should be amongst the results");
+        name_result.names.iter().find(|meta| meta.name == "aa").expect("the value \"aa\" should be amongst the results");
+        name_result.names.iter().find(|meta| meta.name == "ab").expect("the value \"ab\" should be amongst the results");
+        name_result.names.iter().find(|meta| meta.name == "ac").expect("the value \"ac\" should be amongst the results");
+        assert!(
+            name_result.names.iter().find(|meta| meta.name == "test").is_none(),
+            "the value \"test\" should not be included in results because it does not contain the search string",
+        );
+        // Verify that the only result when using a direct search will be found
+        let test_search_result = search("test");
+        assert_eq!(1, test_search_result.names.len(), "expected only a single result to match for input \"test\"");
+        test_search_result.names.iter().find(|meta| meta.name == "test").expect("the value \"test\" should be amongst the results");
+        // Verify that all of the "b" names added in the loop were added
+        let end_of_additions_result = search("b999");
+        assert_eq!(1, end_of_additions_result.names.len(), "expected the final b name to be added");
+        end_of_additions_result.names.iter().find(|meta| meta.name == "b999").expect("the value \"b999\" should be amongst the results");
+        // Verify that searches that find more than MAX_NAME_SEARCH_RESULTS will only find those results
+        let large_search_result = search("b");
+        assert_eq!(
+            MAX_NAME_SEARCH_RESULTS,
+            large_search_result.names.len(),
+            "expected only the max search results to be returned when a query would find more results",
+        );
+        assert!(
+            large_search_result.names.iter().all(|meta| meta.name.contains("b")),
+            "all results found should contain the letter \"b\" as indicated by the query",
+        );
+        // Verify that a search that hits nothing will return an empty array
+        let empty_search_result = search("test0");
+        assert_eq!(0, empty_search_result.names.len(), "a search that finds nothing should return an empty vector of names");
     }
 
     /// Helper to build an Attribute without having to do all the un-fun stuff repeatedly
