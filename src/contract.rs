@@ -1,9 +1,7 @@
 use cosmwasm_std::{Api, BankMsg, Binary, coin, CosmosMsg, Deps, DepsMut, Env, from_binary, MessageInfo, Order, Response, StdError, StdResult, to_binary, Uint128};
 use cosmwasm_storage::Bucket;
 use provwasm_std::{NameBinding, ProvenanceMsg, add_attribute, bind_name, Attributes, Attribute, ProvenanceQuerier};
-use regex::Regex;
 use crate::contract_info::{FEE_DENOMINATION, MAX_NAME_SEARCH_RESULTS, MIN_FEE_AMOUNT};
-
 use crate::error::{ContractError, std_err_result};
 use crate::msg::{ExecuteMsg, InitMsg, MigrateMsg, NameResponse, NameSearchResponse, QueryMsg};
 use crate::state::{NameMeta, State, config, config_read, meta, meta_read};
@@ -233,8 +231,9 @@ fn validate_name(name: String, meta: &Bucket<NameMeta>) -> Result<String, Contra
         return Err(ContractError::NameRegistered { name: name.clone() });
     }
     // Ensures that the given name is all lowercase and has no special characters or spaces
-    let regex = Regex::new(r"^([\da-z]+)$").expect("Provided name validation regex is invalid");
-    if !regex.is_match(name.as_str()) {
+    // Note: This would be a great place to have a regex, but the regex cargo itself adds 500K to
+    // the file size after optimization, excluding it as an option
+    if name.is_empty() || name.chars().any(|char| !char.is_alphanumeric() || (!char.is_lowercase() && !char.is_numeric())) {
         return Err(ContractError::InvalidNameFormat { name });
     }
     Ok("successful validation".into())
