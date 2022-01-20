@@ -74,54 +74,7 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
 }
 
 fn try_query_by_address(deps: Deps, address: String) -> StdResult<Binary> {
-    // Implicitly pull the root registrar name out of the state
-    let registrar_name = match config_read(deps.storage).load() {
-        Ok(config) => config.name,
-        Err(e) => {
-            return std_err_result(format!("failed to load registrar name: {:?}", e));
-        }
-    };
-    // Validate and convert the provided address into an Addr for the attribute query
-    let validated_address = match deps.api.addr_validate(address.as_str()) {
-        Ok(addr) => addr,
-        Err(e) => {
-            return std_err_result(format!("invalid address provided [{}]: {:?}", address, e));
-        }
-    };
-    // Check for the registered name inside the attributes of the target address
-    let attribute_container: Attributes = match ProvenanceQuerier::new(&deps.querier)
-        .get_attributes(validated_address, Some(registrar_name))
-    {
-        Ok(attributes) => attributes,
-        Err(e) => {
-            return std_err_result(format!(
-                "failed to lookup account by address [{}]: {:?}",
-                address, e
-            ));
-        }
-    };
-    // Deserialize all names from their binary-encoded values to the source strings
-    let response_bin = match pack_response_from_attributes(attribute_container) {
-        Ok(binary) => binary,
-        Err(e) => {
-            return std_err_result(format!(
-                "failed to pack attribute response to binary: {:?}",
-                e
-            ))
-        }
-    };
-    // After establishing a vector of all derived names, serialize the list itself to a binary response
-    Ok(response_bin)
-}
-
-/// Creates a NameResponse from an Attribute module response. Isolated for unit testing.
-fn pack_response_from_attributes(attributes: Attributes) -> StdResult<Binary> {
-    let names = attributes
-        .attributes
-        .iter()
-        .map(deserialize_name_from_attribute)
-        .collect();
-    to_binary(&NameResponse::new(attributes.address.into_string(), names))
+    to_binary(&query_name_response_by_address(&deps, address)?)
 }
 
 /// Simple pass-through to convert a binary response from the Attribute module to a usable String.
@@ -257,22 +210,52 @@ fn try_remove_owned_name(
     info: MessageInfo,
     name: String,
 ) -> Result<Response<ProvenanceMsg>, ContractError> {
+    // Query all names upfront, using DepsMut as an immutable borrow before doing other checks
+    let name_response = query_name_response_by_address(&deps.as_ref(), info.sender.clone().into())?;
+    // Pull the storage config state to get the root name for deletion
+    let state = config(deps.storage).load()?;
+    // Get the storage to find the target name to verifiy that it exists and is tied to the sender
     let mut meta_storage = meta(deps.storage);
+    // Verify that storage includes the target name
     let name_meta = match meta_storage.load(name.as_bytes()) {
         Ok(name_meta) => name_meta,
         Err(_) => {
             return Err(ContractError::NameNotFound);
         }
     };
+    // Verify that the address tied to the target name is the same as the sender
     if name_meta.address.as_str() != info.sender.as_str() {
         return Err(ContractError::NameNotOwned);
     }
-    let remove_attribute_message = delete_attributes(info.sender, name_meta.name.clone())?;
+    // Create a message that will delete all names tied to the sender.  We cannot remove a single
+    // name, as they are all registered on the sender's address under the root state.name.
+    let remove_attribute_message = delete_attributes(info.sender.clone(), state.name.clone())?;
+    // Create messages to subsequently re-add all removed attributes except the one targeted for
+    // deletion.
+    // FIXME: There doesn't seem to be a better way to do this with the api.  Api needs to be
+    // FIXME: expanded to allow removal of an attribute by matching on value.
+    let refresh_attributes_messages = name_response
+        .names
+        .into_iter()
+        .filter(|n| n != name.as_str())
+        .map(|n| {
+            add_attribute(
+                info.sender.clone(),
+                state.name.clone(),
+                to_binary(&n).unwrap(),
+                provwasm_std::AttributeValueType::String,
+            )
+            .unwrap()
+        })
+        .collect::<Vec<CosmosMsg<ProvenanceMsg>>>();
+    // After all successful removal messages have been created, remove the target name entry from
+    // the storage
     meta_storage.remove(name.as_bytes());
-    return Ok(Response::new()
+    Ok(Response::new()
         .add_message(remove_attribute_message)
+        .add_messages(refresh_attributes_messages)
         .add_attribute("action", "name_removal")
-        .add_attribute("name_removed", name_meta.name.as_str()));
+        .add_attribute("name_removed", name_meta.name.as_str()))
 }
 
 /// Helper struct to make the validate fee params function response more readable
@@ -402,6 +385,47 @@ fn fee_amount_from_string(fee_amount_string: &str) -> StdResult<u128> {
     }
 }
 
+fn query_name_response_by_address(deps: &Deps, address: String) -> StdResult<NameResponse> {
+    // Implicitly pull the root registrar name out of the state
+    let registrar_name = match config_read(deps.storage).load() {
+        Ok(config) => config.name,
+        Err(e) => {
+            return std_err_result(format!("failed to load registrar name: {:?}", e));
+        }
+    };
+    // Validate and convert the provided address into an Addr for the attribute query
+    let validated_address = match deps.api.addr_validate(address.as_str()) {
+        Ok(addr) => addr,
+        Err(e) => {
+            return std_err_result(format!("invalid address provided [{}]: {:?}", address, e));
+        }
+    };
+    // Check for the registered name inside the attributes of the target address
+    let attribute_container: Attributes = match ProvenanceQuerier::new(&deps.querier)
+        .get_attributes(validated_address, Some(registrar_name))
+    {
+        Ok(attributes) => attributes,
+        Err(e) => {
+            return std_err_result(format!(
+                "failed to lookup account by address [{}]: {:?}",
+                address, e
+            ));
+        }
+    };
+    Ok(create_name_response_from_attributes(attribute_container))
+}
+
+fn create_name_response_from_attributes(attributes: Attributes) -> NameResponse {
+    NameResponse::new(
+        attributes.address.into_string(),
+        attributes
+            .attributes
+            .iter()
+            .map(deserialize_name_from_attribute)
+            .collect(),
+    )
+}
+
 ///
 /// TEST SECTION
 ///
@@ -411,7 +435,7 @@ mod tests {
 
     use super::*;
     use cosmwasm_std::testing::{mock_env, mock_info};
-    use cosmwasm_std::{from_binary, Addr, Coin, CosmosMsg};
+    use cosmwasm_std::{from_binary, Coin, CosmosMsg};
     use provwasm_mocks::mock_dependencies;
     use provwasm_std::{
         AttributeMsgParams, AttributeValueType, NameMsgParams, ProvenanceMsgParams,
@@ -744,30 +768,6 @@ mod tests {
     }
 
     #[test]
-    fn test_pack_response_from_attributes() {
-        let first_name = create_fake_name_attribute("name1");
-        let second_name = create_fake_name_attribute("name2");
-        let attribute_container = Attributes {
-            address: Addr::unchecked("my_address"),
-            attributes: vec![first_name, second_name],
-        };
-        let bin = pack_response_from_attributes(attribute_container)
-            .expect("pack_response_from_attributes should create a valid binary");
-        let name_response: NameResponse = from_binary(&bin)
-            .expect("the generated binary should be resolvable to the source name response");
-        assert_eq!(
-            "my_address",
-            name_response.address.as_str(),
-            "the source address should be exposed in the query"
-        );
-        assert_eq!(
-            2,
-            name_response.names.len(),
-            "the two names should be in the response"
-        );
-    }
-
-    #[test]
     fn test_name_registration_and_lookup_by_address() {
         // Create mocks
         let mut deps = mock_dependencies(&[]);
@@ -963,6 +963,9 @@ mod tests {
         let m_info = mock_info("confusedguy", &vec![coin(DEFAULT_FEE_AMOUNT, "nhash")]);
         do_registration(deps.as_mut(), m_info.clone(), "myname".into()).unwrap();
         let resp = do_owned_name_removal(deps.as_mut(), m_info.clone(), "myname".into()).unwrap();
+        // The unit tests can't actually handle events that occur in provenance-land, so we can't
+        // unit test the piece that actually trims the names in the attribute module.  Therefore,
+        // only the message to delete the root attribute is generated here.  RIP.
         assert_eq!(resp.messages.len(), 1);
         resp.messages.into_iter().for_each(|msg| match msg.msg {
             CosmosMsg::Custom(ProvenanceMsg { params, .. }) => match params {
@@ -970,7 +973,7 @@ mod tests {
                     address,
                     name,
                 }) => {
-                    assert_eq!(name.as_str(), "myname");
+                    assert_eq!(name.as_str(), "wallet.pb");
                     assert_eq!(address.as_str(), "confusedguy");
                 }
                 _ => panic!("unexpected provenance message type was used"),
