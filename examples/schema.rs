@@ -3,7 +3,7 @@ use std::fs::create_dir_all;
 
 use cosmwasm_schema::{export_schema, remove_schemas, schema_for};
 
-use name_smart_contract::msg::{ExecuteMsg, InitMsg, QueryMsg, QueryResponse, MigrateMsg};
+use name_smart_contract::msg::{ExecuteMsg, InitMsg, MigrateMsg, QueryMsg, QueryResponse};
 
 fn main() {
     let mut out_dir = current_dir().unwrap();

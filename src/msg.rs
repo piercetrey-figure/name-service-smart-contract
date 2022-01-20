@@ -15,7 +15,7 @@ pub struct InitMsg {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecuteMsg {
-    Register { name: String, },
+    Register { name: String },
 }
 
 /// A message sent to query contract config state.
@@ -34,8 +34,7 @@ pub type QueryResponse = State;
 /// Migrate the contract
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub struct MigrateMsg {
-}
+pub struct MigrateMsg {}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -45,7 +44,7 @@ pub struct NameResponse {
 }
 impl NameResponse {
     pub fn new(address: String, names: Vec<String>) -> NameResponse {
-        NameResponse { address, names, }
+        NameResponse { address, names }
     }
 }
 
@@ -57,6 +56,6 @@ pub struct NameSearchResponse {
 }
 impl NameSearchResponse {
     pub fn new(search: String, names: Vec<NameMeta>) -> NameSearchResponse {
-        NameSearchResponse { search, names, }
+        NameSearchResponse { search, names }
     }
 }

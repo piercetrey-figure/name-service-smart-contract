@@ -2,7 +2,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use cosmwasm_std::Storage;
-use cosmwasm_storage::{Bucket, ReadonlyBucket, ReadonlySingleton, Singleton, bucket, bucket_read, singleton, singleton_read};
+use cosmwasm_storage::{
+    bucket, bucket_read, singleton, singleton_read, Bucket, ReadonlyBucket, ReadonlySingleton,
+    Singleton,
+};
 
 pub static CONFIG_KEY: &[u8] = b"config";
 pub static NAME_META_KEY: &[u8] = b"name_meta";

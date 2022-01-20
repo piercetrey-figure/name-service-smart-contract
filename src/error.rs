@@ -10,7 +10,6 @@ pub enum ContractError {
     Unauthorized,
     // Add any other custom errors you like here.
     // Look at https://docs.rs/thiserror/1.0.21/thiserror/ for details.
-
     #[error("Name [{name:?}] is already registered")]
     // The msg param is strictly for internal testing
     NameRegistered { name: String },
@@ -31,8 +30,11 @@ pub enum ContractError {
     InvalidNameFormat { name: String },
 
     #[error("Insufficient funds provided for name registration. Provided {amount_provided:?} but required {amount_required:?}")]
-    InsufficientFundsProvided { amount_provided: Uint128, amount_required: Uint128 },
-    
+    InsufficientFundsProvided {
+        amount_provided: Uint128,
+        amount_required: Uint128,
+    },
+
     #[error("Invalid fields: {fields:?}")]
     InvalidFields { fields: Vec<String> },
 }
