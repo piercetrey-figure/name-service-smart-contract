@@ -8,7 +8,8 @@ use cosmwasm_std::{
 };
 use cosmwasm_storage::Bucket;
 use provwasm_std::{
-    add_attribute, bind_name, Attribute, Attributes, NameBinding, ProvenanceMsg, ProvenanceQuerier,
+    add_attribute, bind_name, delete_attributes, Attribute, Attributes, NameBinding, ProvenanceMsg,
+    ProvenanceQuerier,
 };
 
 ///
@@ -159,6 +160,7 @@ pub fn execute(
 ) -> Result<Response<ProvenanceMsg>, ContractError> {
     match msg {
         ExecuteMsg::Register { name } => try_register(deps, info, name),
+        ExecuteMsg::RemoveOwnedName { name } => try_remove_owned_name(deps, info, name),
     }
 }
 
@@ -248,6 +250,29 @@ fn validate_name(name: String, meta: &Bucket<NameMeta>) -> Result<String, Contra
         return Err(ContractError::InvalidNameFormat { name });
     }
     Ok("successful validation".into())
+}
+
+fn try_remove_owned_name(
+    deps: DepsMut,
+    info: MessageInfo,
+    name: String,
+) -> Result<Response<ProvenanceMsg>, ContractError> {
+    let mut meta_storage = meta(deps.storage);
+    let name_meta = match meta_storage.load(name.as_bytes()) {
+        Ok(name_meta) => name_meta,
+        Err(_) => {
+            return Err(ContractError::NameNotFound);
+        }
+    };
+    if name_meta.address.as_str() != info.sender.as_str() {
+        return Err(ContractError::NameNotOwned);
+    }
+    let remove_attribute_message = delete_attributes(info.sender, name_meta.name.clone())?;
+    meta_storage.remove(name.as_bytes());
+    return Ok(Response::new()
+        .add_message(remove_attribute_message)
+        .add_attribute("action", "name_removal")
+        .add_attribute("name_removed", name_meta.name.as_str()));
 }
 
 /// Helper struct to make the validate fee params function response more readable
@@ -928,6 +953,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_remove_owned_name_successfully() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::Basic {
+            deps: deps.as_mut(),
+        })
+        .unwrap();
+        let m_info = mock_info("confusedguy", &vec![coin(DEFAULT_FEE_AMOUNT, "nhash")]);
+        do_registration(deps.as_mut(), m_info.clone(), "myname".into()).unwrap();
+        let resp = do_owned_name_removal(deps.as_mut(), m_info.clone(), "myname".into()).unwrap();
+        assert_eq!(resp.messages.len(), 1);
+        resp.messages.into_iter().for_each(|msg| match msg.msg {
+            CosmosMsg::Custom(ProvenanceMsg { params, .. }) => match params {
+                ProvenanceMsgParams::Attribute(AttributeMsgParams::DeleteAttribute {
+                    address,
+                    name,
+                }) => {
+                    assert_eq!(name.as_str(), "myname");
+                    assert_eq!(address.as_str(), "confusedguy");
+                }
+                _ => panic!("unexpected provenance message type was used"),
+            },
+            _ => panic!("unexpected cosmos message type was used"),
+        });
+        let failure =
+            do_owned_name_removal(deps.as_mut(), m_info.clone(), "myname".into()).unwrap_err();
+        assert!(matches!(failure, ContractError::NameNotFound), "After removing the name, it should no longer be found in local storage and a subsequent duplicate call should fail");
+    }
+
     /// Helper to build an Attribute without having to do all the un-fun stuff repeatedly
     fn create_fake_name_attribute(name: &str) -> Attribute {
         Attribute {
@@ -948,6 +1002,19 @@ mod tests {
             mock_env(),
             message_info,
             ExecuteMsg::Register { name },
+        )
+    }
+
+    fn do_owned_name_removal(
+        deps: DepsMut,
+        message_info: MessageInfo,
+        name: String,
+    ) -> Result<Response<ProvenanceMsg>, ContractError> {
+        execute(
+            deps,
+            mock_env(),
+            message_info,
+            ExecuteMsg::RemoveOwnedName { name },
         )
     }
 

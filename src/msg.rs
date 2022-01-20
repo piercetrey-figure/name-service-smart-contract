@@ -16,6 +16,7 @@ pub struct InitMsg {
 #[serde(rename_all = "snake_case")]
 pub enum ExecuteMsg {
     Register { name: String },
+    RemoveOwnedName { name: String },
 }
 
 /// A message sent to query contract config state.
