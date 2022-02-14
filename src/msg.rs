@@ -1,3 +1,5 @@
+use cosmwasm_std::{CosmosMsg, CustomMsg, Response};
+use provwasm_std::{ProvenanceMsg, ProvenanceMsgParams, ProvenanceRoute};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -34,7 +36,15 @@ pub type QueryResponse = State;
 /// Migrate the contract
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub struct MigrateMsg {}
+pub struct MigrateMsg {
+    pub new_fee_amount: Option<String>,
+    pub new_fee_collection_address: Option<String>,
+}
+impl MigrateMsg {
+    pub fn has_fee_changes(&self) -> bool {
+        self.new_fee_amount.is_some() || self.new_fee_collection_address.is_some()
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -59,3 +69,30 @@ impl NameSearchResponse {
         NameSearchResponse { search, names }
     }
 }
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ProvenanceMsgV2 {
+    pub route: ProvenanceRoute,
+    pub params: ProvenanceMsgParams,
+    pub version: String,
+}
+impl ProvenanceMsgV2 {
+    pub fn from_cosmos(msg: CosmosMsg<ProvenanceMsg>) -> CosmosMsg<ProvenanceMsgV2> {
+        match msg {
+            CosmosMsg::Custom(provenance_msg) => {
+                CosmosMsg::Custom(ProvenanceMsgV2 {
+                    route: provenance_msg.route,
+                    params: provenance_msg.params,
+                    version: provenance_msg.version,
+                })
+            },
+            _ => panic!("unexpected message type provided to converter"),
+        }
+    }
+
+    pub fn from_prov(msg: ProvenanceMsg) -> ProvenanceMsgV2 {
+        ProvenanceMsgV2 { route: msg.route, params: msg.params, version: msg.version, }
+    }
+}
+impl CustomMsg for ProvenanceMsgV2 {}

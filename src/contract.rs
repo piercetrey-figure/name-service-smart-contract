@@ -1,10 +1,10 @@
 use crate::contract_info::{FEE_DENOMINATION, MAX_NAME_SEARCH_RESULTS};
 use crate::error::{std_err_result, ContractError};
-use crate::msg::{ExecuteMsg, InitMsg, MigrateMsg, NameResponse, NameSearchResponse, QueryMsg};
+use crate::msg::{ExecuteMsg, InitMsg, MigrateMsg, NameResponse, NameSearchResponse, ProvenanceMsgV2, QueryMsg};
 use crate::state::{config, config_read, meta, meta_read, NameMeta, State};
 use cosmwasm_std::{
-    coin, from_binary, to_binary, Api, BankMsg, Binary, CosmosMsg, Deps, DepsMut, Env, MessageInfo,
-    Order, Response, StdError, StdResult, Uint128,
+    coin, entry_point, from_binary, to_binary, Api, BankMsg, Binary, CosmosMsg, Deps, DepsMut, Env,
+    MessageInfo, Order, Response, StdError, StdResult, Uint128,
 };
 use cosmwasm_storage::Bucket;
 use provwasm_std::{
@@ -15,12 +15,13 @@ use provwasm_std::{
 ///
 /// INSTANTIATION SECTION
 ///
+#[entry_point]
 pub fn instantiate(
     deps: DepsMut<ProvenanceQuery>,
     env: Env,
     info: MessageInfo,
     msg: InitMsg,
-) -> Result<Response<ProvenanceMsg>, StdError> {
+) -> Result<Response<ProvenanceMsgV2>, StdError> {
     // Ensure no funds were sent with the message
     if !info.funds.is_empty() {
         return std_err_result("purchase funds are not allowed to be sent during init");
@@ -48,13 +49,14 @@ pub fn instantiate(
 
     // Dispatch messages and emit event attributes
     Ok(Response::new()
-        .add_message(bind_name_msg)
+        .add_message(ProvenanceMsgV2::from_cosmos(bind_name_msg))
         .add_attribute("action", "init"))
 }
 
 ///
 /// QUERY SECTION
 ///
+#[entry_point]
 pub fn query(deps: Deps<ProvenanceQuery>, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::QueryRequest {} => {
@@ -152,12 +154,13 @@ fn search_for_names(deps: Deps<ProvenanceQuery>, search: String) -> StdResult<Bi
 ///
 /// EXECUTE SECTION
 ///
+#[entry_point]
 pub fn execute(
     deps: DepsMut<ProvenanceQuery>,
     _env: Env,
     info: MessageInfo,
     msg: ExecuteMsg,
-) -> Result<Response<ProvenanceMsg>, ContractError> {
+) -> Result<Response<ProvenanceMsgV2>, ContractError> {
     match msg {
         ExecuteMsg::Register { name } => try_register(deps, info, name),
     }
@@ -168,7 +171,7 @@ fn try_register(
     deps: DepsMut<ProvenanceQuery>,
     info: MessageInfo,
     name: String,
-) -> Result<Response<ProvenanceMsg>, ContractError> {
+) -> Result<Response<ProvenanceMsgV2>, ContractError> {
     let config = config(deps.storage).load()?;
 
     // Fetch the name registry bucket from storage for use in dupe verification, as well as
@@ -189,12 +192,12 @@ fn try_register(
     };
 
     // Construct the new attribute message for dispatch
-    let add_attribute_message = add_attribute(
+    let add_attribute_message = ProvenanceMsgV2::from_cosmos(add_attribute(
         info.sender.clone(),
         config.clone().name,
         name_bin,
         provwasm_std::AttributeValueType::String,
-    )?;
+    )?);
 
     // Validate that fees are payable and correctly constructed. Errors are properly packaged within
     // the target function, which makes this a perfect candidate for bubbling up via the ? operator
@@ -253,8 +256,8 @@ fn validate_name(name: String, meta: &Bucket<NameMeta>) -> Result<String, Contra
 
 /// Helper struct to make the validate fee params function response more readable
 struct FeeChargeResponse {
-    fee_charge_message: Option<CosmosMsg<ProvenanceMsg>>,
-    fee_refund_message: Option<CosmosMsg<ProvenanceMsg>>,
+    fee_charge_message: Option<CosmosMsg<ProvenanceMsgV2>>,
+    fee_refund_message: Option<CosmosMsg<ProvenanceMsgV2>>,
     fee_refund_amount: u128,
 }
 
@@ -359,14 +362,42 @@ fn validate_fee_params_get_messages(
 ///
 /// MIGRATE SECTION
 ///
-/// TODO: Allow fee amount swap across migrations
-///
+#[entry_point]
 pub fn migrate(
-    _deps: DepsMut<ProvenanceQuery>,
+    deps: DepsMut<ProvenanceQuery>,
     _env: Env,
-    _msg: MigrateMsg,
+    msg: MigrateMsg,
 ) -> Result<Response, ContractError> {
-    Ok(Response::default())
+    let mut attributes: Vec<cosmwasm_std::Attribute> = vec![];
+    // If any optional migration values were provided, swap them over during the migration
+    if msg.has_fee_changes() {
+        let mut config = config(deps.storage);
+        let mut state = config.load()?;
+        state.fee_amount = match msg.new_fee_amount {
+            Some(amount) => {
+                fee_amount_from_string(amount.as_str())?;
+                attributes.push(cosmwasm_std::Attribute::new(
+                    "fee_amount_updated",
+                    amount.clone(),
+                ));
+                amount
+            }
+            None => state.fee_amount,
+        };
+        state.fee_collection_address = match msg.new_fee_collection_address {
+            Some(addr_str) => {
+                deps.api.addr_validate(addr_str.as_str())?;
+                attributes.push(cosmwasm_std::Attribute::new(
+                    "fee_collection_address_updated",
+                    addr_str.clone(),
+                ));
+                addr_str
+            }
+            None => state.fee_collection_address,
+        };
+        config.save(&state)?;
+    }
+    Ok(Response::new().add_attributes(attributes))
 }
 
 ///
@@ -462,7 +493,7 @@ mod tests {
         // Ensure we have the attribute message and the fee message
         assert_eq!(res.messages.len(), 2);
         res.messages.into_iter().for_each(|msg| match msg.msg {
-            CosmosMsg::Custom(ProvenanceMsg { params, .. }) => {
+            CosmosMsg::Custom(ProvenanceMsgV2 { params, .. }) => {
                 verify_add_attribute_result(params, "wallet.pb", "mycoolname");
             }
             CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
@@ -516,7 +547,7 @@ mod tests {
         );
 
         response.messages.into_iter().for_each(|msg| match msg.msg {
-            CosmosMsg::Custom(ProvenanceMsg { params, .. }) => {
+            CosmosMsg::Custom(ProvenanceMsgV2 { params, .. }) => {
                 verify_add_attribute_result(params, "wallet.pb", "thebestnameever");
             }
             CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
@@ -581,7 +612,7 @@ mod tests {
             .messages
             .into_iter()
             .for_each(|msg| match msg.msg {
-                CosmosMsg::Custom(ProvenanceMsg { params, .. }) => {
+                CosmosMsg::Custom(ProvenanceMsgV2 { params, .. }) => {
                     verify_add_attribute_result(params, "wallet.pb", "nameofmine");
                 }
                 _ => panic!("unexpected response message type"),
@@ -614,7 +645,7 @@ mod tests {
             "two messages should be responded with when a fee is not charged, but a refund is made"
         );
         refund_resp.messages.into_iter().for_each(|msg| match msg.msg {
-            CosmosMsg::Custom(ProvenanceMsg { params, .. }) => {
+            CosmosMsg::Custom(ProvenanceMsgV2 { params, .. }) => {
                 verify_add_attribute_result(params, "wallet.pb", "nametouse");
             }
             CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
@@ -933,6 +964,142 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_migration_with_no_state_changes() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::Basic {
+            deps: deps.as_mut(),
+        })
+        .unwrap();
+        let migrate_response = migrate(
+            deps.as_mut(),
+            mock_env(),
+            MigrateMsg {
+                new_fee_amount: None,
+                new_fee_collection_address: None,
+            },
+        )
+        .unwrap();
+        assert!(
+            migrate_response.attributes.is_empty(),
+            "no attributes should be added, indicating that the migration made no changes"
+        );
+    }
+
+    #[test]
+    fn test_migration_with_only_fee_changed() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::FeeParams {
+            deps: deps.as_mut(),
+            fee_amount: 100,
+            fee_collection_address: "fake_address".into(),
+        })
+        .unwrap();
+        let migrate_response = migrate(
+            deps.as_mut(),
+            mock_env(),
+            MigrateMsg {
+                new_fee_amount: Some("150".to_string()),
+                new_fee_collection_address: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            1,
+            migrate_response.attributes.len(),
+            "only one attribute should be added, indicating that a single state value was changed"
+        );
+        let attribute = migrate_response
+            .attributes
+            .first()
+            .expect("The first element should be available within the migration values");
+        assert_eq!(
+            "fee_amount_updated",
+            attribute.key.as_str(),
+            "Expected the key to show that the fee was changed",
+        );
+        assert_eq!(
+            "150",
+            attribute.value.as_str(),
+            "Expected the value to show the new value that the fee amount was updated to",
+        );
+    }
+
+    #[test]
+    fn test_migration_with_only_fee_address_changed() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::FeeParams {
+            deps: deps.as_mut(),
+            fee_amount: 100,
+            fee_collection_address: "fake_address".into(),
+        })
+        .unwrap();
+        let migrate_response = migrate(
+            deps.as_mut(),
+            mock_env(),
+            MigrateMsg {
+                new_fee_amount: None,
+                new_fee_collection_address: Some("new_address".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            1,
+            migrate_response.attributes.len(),
+            "only one attribute should be added, indicating that a single state value was changed"
+        );
+        let attribute = migrate_response
+            .attributes
+            .first()
+            .expect("The first element should be available within the migration values");
+        assert_eq!(
+            "fee_collection_address_updated",
+            attribute.key.as_str(),
+            "Expected the key to show that the fee address was changed",
+        );
+        assert_eq!(
+            "new_address",
+            attribute.value.as_str(),
+            "Expected the value to show the new value that the fee address was updated to",
+        );
+    }
+
+    #[test]
+    fn test_migration_with_invalid_new_fee_amount() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::Basic {
+            deps: deps.as_mut(),
+        })
+        .unwrap();
+        migrate(
+            deps.as_mut(),
+            mock_env(),
+            MigrateMsg {
+                new_fee_amount: Some("not a number".to_string()),
+                new_fee_collection_address: None,
+            },
+        )
+        .unwrap_err();
+    }
+
+    #[test]
+    fn test_migration_with_invalid_new_fee_collection_address() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::Basic {
+            deps: deps.as_mut(),
+        })
+        .unwrap();
+        migrate(
+            deps.as_mut(),
+            mock_env(),
+            MigrateMsg {
+                new_fee_amount: None,
+                new_fee_collection_address: Some("".to_string()),
+            },
+        )
+        .unwrap_err();
+    }
+
     /// Helper to build an Attribute without having to do all the un-fun stuff repeatedly
     fn create_fake_name_attribute(name: &str) -> Attribute {
         Attribute {
@@ -947,7 +1114,7 @@ mod tests {
         deps: DepsMut<ProvenanceQuery>,
         message_info: MessageInfo,
         name: String,
-    ) -> Result<Response<ProvenanceMsg>, ContractError> {
+    ) -> Result<Response<ProvenanceMsgV2>, ContractError> {
         execute(
             deps,
             mock_env(),
@@ -970,7 +1137,7 @@ mod tests {
 
     /// Helper to instantiate the contract without being forced to pass all params, are most are
     /// generally unneeded.
-    fn test_instantiate(inst: InstArgs) -> Result<Response<ProvenanceMsg>, StdError> {
+    fn test_instantiate(inst: InstArgs) -> Result<Response<ProvenanceMsgV2>, StdError> {
         let (deps, fee_amount, fee_address) = match inst {
             InstArgs::Basic { deps } => (deps, DEFAULT_FEE_AMOUNT, "tp123"),
             InstArgs::FeeParams {
