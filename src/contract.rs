@@ -9,13 +9,14 @@ use cosmwasm_std::{
 use cosmwasm_storage::Bucket;
 use provwasm_std::{
     add_attribute, bind_name, Attribute, Attributes, NameBinding, ProvenanceMsg, ProvenanceQuerier,
+    ProvenanceQuery,
 };
 
 ///
 /// INSTANTIATION SECTION
 ///
 pub fn instantiate(
-    deps: DepsMut,
+    deps: DepsMut<ProvenanceQuery>,
     env: Env,
     info: MessageInfo,
     msg: InitMsg,
@@ -54,7 +55,7 @@ pub fn instantiate(
 ///
 /// QUERY SECTION
 ///
-pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
+pub fn query(deps: Deps<ProvenanceQuery>, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::QueryRequest {} => {
             let state = config_read(deps.storage).load()?;
@@ -72,7 +73,7 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     }
 }
 
-fn try_query_by_address(deps: Deps, address: String) -> StdResult<Binary> {
+fn try_query_by_address(deps: Deps<ProvenanceQuery>, address: String) -> StdResult<Binary> {
     // Implicitly pull the root registrar name out of the state
     let registrar_name = match config_read(deps.storage).load() {
         Ok(config) => config.name,
@@ -131,7 +132,7 @@ fn deserialize_name_from_attribute(attribute: &Attribute) -> String {
 
 /// Scans the entire storage for the target name string by doing direct matches.
 /// Will only ever return a maximum of MAX_NAME_SEARCH_RESULTS.
-fn search_for_names(deps: Deps, search: String) -> StdResult<Binary> {
+fn search_for_names(deps: Deps<ProvenanceQuery>, search: String) -> StdResult<Binary> {
     let meta_storage = meta_read(deps.storage);
     let search_str = search.as_str();
     let names = meta_storage
@@ -152,7 +153,7 @@ fn search_for_names(deps: Deps, search: String) -> StdResult<Binary> {
 /// EXECUTE SECTION
 ///
 pub fn execute(
-    deps: DepsMut,
+    deps: DepsMut<ProvenanceQuery>,
     _env: Env,
     info: MessageInfo,
     msg: ExecuteMsg,
@@ -164,7 +165,7 @@ pub fn execute(
 
 // register a name
 fn try_register(
-    deps: DepsMut,
+    deps: DepsMut<ProvenanceQuery>,
     info: MessageInfo,
     name: String,
 ) -> Result<Response<ProvenanceMsg>, ContractError> {
@@ -360,7 +361,11 @@ fn validate_fee_params_get_messages(
 ///
 /// TODO: Allow fee amount swap across migrations
 ///
-pub fn migrate(_deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
+pub fn migrate(
+    _deps: DepsMut<ProvenanceQuery>,
+    _env: Env,
+    _msg: MigrateMsg,
+) -> Result<Response, ContractError> {
     Ok(Response::default())
 }
 
@@ -939,7 +944,7 @@ mod tests {
 
     /// Helper to do a registration without all the extra boilerplate
     fn do_registration(
-        deps: DepsMut,
+        deps: DepsMut<ProvenanceQuery>,
         message_info: MessageInfo,
         name: String,
     ) -> Result<Response<ProvenanceMsg>, ContractError> {
@@ -954,10 +959,10 @@ mod tests {
     /// Driver for multiple instantiate types, on the chance that different defaults are needed
     enum InstArgs<'a> {
         Basic {
-            deps: DepsMut<'a>,
+            deps: DepsMut<'a, ProvenanceQuery>,
         },
         FeeParams {
-            deps: DepsMut<'a>,
+            deps: DepsMut<'a, ProvenanceQuery>,
             fee_amount: u128,
             fee_collection_address: &'a str,
         },
