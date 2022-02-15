@@ -1,4 +1,4 @@
-use cosmwasm_std::{StdError, StdResult, Uint128};
+use cosmwasm_std::{StdError, StdResult};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -23,6 +23,12 @@ pub enum ContractError {
     #[error("No nhash amount provided during name registration")]
     NoFundsProvidedForRegistration,
 
+    #[error("Previous contract name [{previous_contract:?}] does not match provided name [{provided_contract:?}]")]
+    InvalidContractName { previous_contract: String, provided_contract: String },
+
+    #[error("Previous contract version [{previous_version}] is higher than provided version [{provided_version}]")]
+    InvalidContractVersion { previous_version: String, provided_version: String },
+
     #[error("Non nhash coin provided for transaction {types:?}")]
     InvalidFundsProvided { types: Vec<String> },
 
@@ -31,12 +37,31 @@ pub enum ContractError {
 
     #[error("Insufficient funds provided for name registration. Provided {amount_provided:?} but required {amount_required:?}")]
     InsufficientFundsProvided {
-        amount_provided: Uint128,
-        amount_required: Uint128,
+        amount_provided: u128,
+        amount_required: u128,
     },
 
     #[error("Invalid fields: {fields:?}")]
     InvalidFields { fields: Vec<String> },
+
+    #[error("Semver parsing error: {0}")]
+    SemVer(String),
+}
+impl ContractError {
+    /// Allows ContractError instances to be generically returned as a Response in a fluent manner
+    /// instead of wrapping in an Err() call, improving readability.
+    /// Ex: return ContractError::NameNotFound.to_result();
+    /// vs
+    ///     return Err(ContractError::NameNotFound);
+    pub fn to_result<T>(self) -> Result<T, ContractError> {
+        Err(self)
+    }
+}
+impl From<semver::Error> for ContractError {
+    /// Enables SemVer issues to cast convert implicitly to contract error
+    fn from(err: semver::Error) -> Self {
+        Self::SemVer(err.to_string())
+    }
 }
 
 /// A simple abstraction to wrap an error response just by passing the message

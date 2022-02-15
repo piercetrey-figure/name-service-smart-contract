@@ -4,13 +4,15 @@ use crate::msg::{ExecuteMsg, InitMsg, MigrateMsg, NameResponse, NameSearchRespon
 use crate::state::{config, config_read, meta, meta_read, NameMeta, State};
 use cosmwasm_std::{
     coin, entry_point, from_binary, to_binary, Api, BankMsg, Binary, CosmosMsg, Deps, DepsMut, Env,
-    MessageInfo, Order, Response, StdError, StdResult, Uint128,
+    MessageInfo, Order, Response, StdResult, Uint128,
 };
 use cosmwasm_storage::Bucket;
 use provwasm_std::{
     add_attribute, bind_name, Attribute, Attributes, NameBinding, ProvenanceMsg, ProvenanceQuerier,
     ProvenanceQuery,
 };
+use semver::Version;
+use crate::version_info::{CONTRACT_NAME, CONTRACT_VERSION, get_version_info, migrate_version_info};
 
 ///
 /// INSTANTIATION SECTION
@@ -21,10 +23,10 @@ pub fn instantiate(
     env: Env,
     info: MessageInfo,
     msg: InitMsg,
-) -> Result<Response<ProvenanceMsg>, StdError> {
+) -> Result<Response<ProvenanceMsg>, ContractError> {
     // Ensure no funds were sent with the message
     if !info.funds.is_empty() {
-        return std_err_result("purchase funds are not allowed to be sent during init");
+        return std_err_result("purchase funds are not allowed to be sent during init").map_err(ContractError::Std);
     }
     // Verify the fee amount can be converted from string successfully
     fee_amount_from_string(&msg.fee_amount)?;
@@ -36,16 +38,19 @@ pub fn instantiate(
     }) {
         Ok(_) => {}
         Err(e) => {
-            return std_err_result(format!("failed to init state: {:?}", e));
+            return std_err_result(format!("failed to init state: {:?}", e)).map_err(ContractError::Std);
         }
     };
     // Create a message that will bind a restricted name to the contract address.
     let bind_name_msg = match bind_name(&msg.name, env.contract.address, NameBinding::Restricted) {
         Ok(result) => result,
         Err(e) => {
-            return std_err_result(format!("failed to construct bind name message: {:?}", e));
+            return std_err_result(format!("failed to construct bind name message: {:?}", e)).map_err(ContractError::Std);
         }
     };
+
+    // Set the version info to the default contract values on instantiation
+    migrate_version_info(deps.storage)?;
 
     // Dispatch messages and emit event attributes
     Ok(Response::new()
@@ -187,7 +192,7 @@ fn try_register(
     let name_bin = match to_binary(&name) {
         Ok(bin) => bin,
         Err(e) => {
-            return Err(ContractError::NameSerializationFailure { cause: e });
+            return ContractError::NameSerializationFailure { cause: e }.to_result();
         }
     };
 
@@ -239,7 +244,7 @@ fn try_register(
 fn validate_name(name: String, meta: &Bucket<NameMeta>) -> Result<String, ContractError> {
     // If the load doesn't error out, that means it found the input name
     if meta.load(name.as_bytes()).is_ok() {
-        return Err(ContractError::NameRegistered { name });
+        return ContractError::NameRegistered { name }.to_result();
     }
     // Ensures that the given name is all lowercase and has no special characters or spaces
     // Note: This would be a great place to have a regex, but the regex cargo itself adds 500K to
@@ -249,7 +254,7 @@ fn validate_name(name: String, meta: &Bucket<NameMeta>) -> Result<String, Contra
             .chars()
             .any(|char| !char.is_alphanumeric() || (!char.is_lowercase() && !char.is_numeric()))
     {
-        return Err(ContractError::InvalidNameFormat { name });
+        return ContractError::InvalidNameFormat { name }.to_result();
     }
     Ok("successful validation".into())
 }
@@ -290,9 +295,7 @@ fn validate_fee_params_get_messages(
     // If any funds are found that do not match the fee denom, exit prematurely to prevent
     // contract from siphoning random funds for no reason
     if !invalid_funds.is_empty() {
-        return Err(ContractError::InvalidFundsProvided {
-            types: invalid_funds,
-        });
+        return ContractError::InvalidFundsProvided { types: invalid_funds }.to_result();
     }
 
     let nhash_fee_amount = fee_amount_from_string(&config.fee_amount)?;
@@ -310,7 +313,7 @@ fn validate_fee_params_get_messages(
             // absence of one is an error.  Otherwise, treat omission as purposeful definition of
             // zero money fronted for a fee
             if nhash_fee_amount > 0 {
-                return Err(ContractError::NoFundsProvidedForRegistration);
+                return ContractError::NoFundsProvidedForRegistration.to_result();
             } else {
                 Uint128::zero()
             }
@@ -319,10 +322,10 @@ fn validate_fee_params_get_messages(
 
     // If the amount provided is too low, reject the request because the fee cannot be paid
     if nhash_sent.u128() < nhash_fee_amount {
-        return Err(ContractError::InsufficientFundsProvided {
-            amount_provided: nhash_sent,
-            amount_required: nhash_fee_amount.into(),
-        });
+        return ContractError::InsufficientFundsProvided {
+            amount_provided: nhash_sent.u128(),
+            amount_required: nhash_fee_amount,
+        }.to_result();
     }
 
     // Pull the fee amount from the sender for name registration
@@ -368,6 +371,24 @@ pub fn migrate(
     _env: Env,
     msg: MigrateMsg,
 ) -> Result<Response, ContractError> {
+    let stored_version_info = get_version_info(deps.storage)?;
+    // If the contract name has changed or another contract attempts to overwrite this one, this
+    // check will reject the change
+    if CONTRACT_NAME != stored_version_info.contract {
+        return ContractError::InvalidContractName {
+            previous_contract: stored_version_info.contract,
+            provided_contract: CONTRACT_NAME.to_string(),
+        }.to_result();
+    }
+    let contract_version = CONTRACT_VERSION.parse::<Version>()?;
+    // If the stored version in the contract is greater than the derived version from the package,
+    // then this migration is effectively a downgrade and should not be committed
+    if stored_version_info.parse_sem_ver()? > contract_version {
+        return ContractError::InvalidContractVersion {
+            previous_version: stored_version_info.version,
+            provided_version: CONTRACT_VERSION.to_string(),
+        }.to_result();
+    }
     let mut attributes: Vec<cosmwasm_std::Attribute> = vec![];
     // If any optional migration values were provided, swap them over during the migration
     if msg.has_fee_changes() {
@@ -427,6 +448,7 @@ mod tests {
     use provwasm_std::{
         AttributeMsgParams, AttributeValueType, NameMsgParams, ProvenanceMsgParams,
     };
+    use crate::version_info::{set_version_info, VersionInfoV1};
 
     const DEFAULT_FEE_AMOUNT: u128 = 10000000000;
 
@@ -971,15 +993,7 @@ mod tests {
             deps: deps.as_mut(),
         })
         .unwrap();
-        let migrate_response = migrate(
-            deps.as_mut(),
-            mock_env(),
-            MigrateMsg {
-                new_fee_amount: None,
-                new_fee_collection_address: None,
-            },
-        )
-        .unwrap();
+        let migrate_response = migrate(deps.as_mut(), mock_env(), MigrateMsg::empty()).unwrap();
         assert!(
             migrate_response.attributes.is_empty(),
             "no attributes should be added, indicating that the migration made no changes"
@@ -1100,6 +1114,68 @@ mod tests {
         .unwrap_err();
     }
 
+    #[test]
+    fn test_migration_with_invalid_contract_name() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::Basic {
+            deps: deps.as_mut(),
+        }).unwrap();
+        // Override the internal contract name to a new, different name
+        set_version_info(
+            deps.as_mut().storage,
+            &VersionInfoV1 {
+                contract: "Fake Name".to_string(),
+                version: CONTRACT_VERSION.to_string(),
+            }
+        ).unwrap();
+        let error = migrate(deps.as_mut(), mock_env(), MigrateMsg::empty()).unwrap_err();
+        match error {
+            ContractError::InvalidContractName { previous_contract, provided_contract } => {
+                assert_eq!(
+                    "Fake Name",
+                    previous_contract,
+                    "the previous contract name should be the value in storage",
+                );
+                assert_eq!(
+                    CONTRACT_NAME,
+                    provided_contract.as_str(),
+                    "the provided contract name should be the cargo package name",
+                );
+            },
+            _ => panic!("unexpected error encountered when bad contract name provided"),
+        };
+    }
+
+    #[test]
+    fn test_migration_with_invalid_version() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::Basic { deps: deps.as_mut() }).unwrap();
+        // Override the internal contract version to a version one minor value above the current version
+        set_version_info(
+            deps.as_mut().storage,
+            &VersionInfoV1 {
+                contract: CONTRACT_NAME.to_string(),
+                version: "0.2.1".to_string(),
+            }
+        ).unwrap();
+        let error = migrate(deps.as_mut(), mock_env(), MigrateMsg::empty()).unwrap_err();
+        match error {
+            ContractError::InvalidContractVersion { previous_version, provided_version } => {
+                assert_eq!(
+                    "0.2.1",
+                    previous_version,
+                    "the previous contract version should be the value in storage",
+                );
+                assert_eq!(
+                    CONTRACT_VERSION,
+                    provided_version.as_str(),
+                    "the provided contract version should be the cargo package version",
+                );
+            },
+            _ => panic!("unexpected error encountered when bad contract version provided"),
+        }
+    }
+
     /// Helper to build an Attribute without having to do all the un-fun stuff repeatedly
     fn create_fake_name_attribute(name: &str) -> Attribute {
         Attribute {
@@ -1137,7 +1213,7 @@ mod tests {
 
     /// Helper to instantiate the contract without being forced to pass all params, are most are
     /// generally unneeded.
-    fn test_instantiate(inst: InstArgs) -> Result<Response<ProvenanceMsg>, StdError> {
+    fn test_instantiate(inst: InstArgs) -> Result<Response<ProvenanceMsg>, ContractError> {
         let (deps, fee_amount, fee_address) = match inst {
             InstArgs::Basic { deps } => (deps, DEFAULT_FEE_AMOUNT, "tp123"),
             InstArgs::FeeParams {
