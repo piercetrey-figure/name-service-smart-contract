@@ -1,6 +1,6 @@
 use crate::contract_info::{FEE_DENOMINATION, MAX_NAME_SEARCH_RESULTS};
 use crate::error::{std_err_result, ContractError};
-use crate::msg::{ExecuteMsg, InitMsg, MigrateMsg, NameResponse, NameSearchResponse, ProvenanceMsgV2, QueryMsg};
+use crate::msg::{ExecuteMsg, InitMsg, MigrateMsg, NameResponse, NameSearchResponse, QueryMsg};
 use crate::state::{config, config_read, meta, meta_read, NameMeta, State};
 use cosmwasm_std::{
     coin, entry_point, from_binary, to_binary, Api, BankMsg, Binary, CosmosMsg, Deps, DepsMut, Env,
@@ -21,7 +21,7 @@ pub fn instantiate(
     env: Env,
     info: MessageInfo,
     msg: InitMsg,
-) -> Result<Response<ProvenanceMsgV2>, StdError> {
+) -> Result<Response<ProvenanceMsg>, StdError> {
     // Ensure no funds were sent with the message
     if !info.funds.is_empty() {
         return std_err_result("purchase funds are not allowed to be sent during init");
@@ -49,7 +49,7 @@ pub fn instantiate(
 
     // Dispatch messages and emit event attributes
     Ok(Response::new()
-        .add_message(ProvenanceMsgV2::from_cosmos(bind_name_msg))
+        .add_message(bind_name_msg)
         .add_attribute("action", "init"))
 }
 
@@ -160,7 +160,7 @@ pub fn execute(
     _env: Env,
     info: MessageInfo,
     msg: ExecuteMsg,
-) -> Result<Response<ProvenanceMsgV2>, ContractError> {
+) -> Result<Response<ProvenanceMsg>, ContractError> {
     match msg {
         ExecuteMsg::Register { name } => try_register(deps, info, name),
     }
@@ -171,7 +171,7 @@ fn try_register(
     deps: DepsMut<ProvenanceQuery>,
     info: MessageInfo,
     name: String,
-) -> Result<Response<ProvenanceMsgV2>, ContractError> {
+) -> Result<Response<ProvenanceMsg>, ContractError> {
     let config = config(deps.storage).load()?;
 
     // Fetch the name registry bucket from storage for use in dupe verification, as well as
@@ -192,12 +192,12 @@ fn try_register(
     };
 
     // Construct the new attribute message for dispatch
-    let add_attribute_message = ProvenanceMsgV2::from_cosmos(add_attribute(
+    let add_attribute_message = add_attribute(
         info.sender.clone(),
         config.clone().name,
         name_bin,
         provwasm_std::AttributeValueType::String,
-    )?);
+    )?;
 
     // Validate that fees are payable and correctly constructed. Errors are properly packaged within
     // the target function, which makes this a perfect candidate for bubbling up via the ? operator
@@ -256,8 +256,8 @@ fn validate_name(name: String, meta: &Bucket<NameMeta>) -> Result<String, Contra
 
 /// Helper struct to make the validate fee params function response more readable
 struct FeeChargeResponse {
-    fee_charge_message: Option<CosmosMsg<ProvenanceMsgV2>>,
-    fee_refund_message: Option<CosmosMsg<ProvenanceMsgV2>>,
+    fee_charge_message: Option<CosmosMsg<ProvenanceMsg>>,
+    fee_refund_message: Option<CosmosMsg<ProvenanceMsg>>,
     fee_refund_amount: u128,
 }
 
@@ -493,7 +493,7 @@ mod tests {
         // Ensure we have the attribute message and the fee message
         assert_eq!(res.messages.len(), 2);
         res.messages.into_iter().for_each(|msg| match msg.msg {
-            CosmosMsg::Custom(ProvenanceMsgV2 { params, .. }) => {
+            CosmosMsg::Custom(ProvenanceMsg { params, .. }) => {
                 verify_add_attribute_result(params, "wallet.pb", "mycoolname");
             }
             CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
@@ -547,7 +547,7 @@ mod tests {
         );
 
         response.messages.into_iter().for_each(|msg| match msg.msg {
-            CosmosMsg::Custom(ProvenanceMsgV2 { params, .. }) => {
+            CosmosMsg::Custom(ProvenanceMsg { params, .. }) => {
                 verify_add_attribute_result(params, "wallet.pb", "thebestnameever");
             }
             CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
@@ -612,7 +612,7 @@ mod tests {
             .messages
             .into_iter()
             .for_each(|msg| match msg.msg {
-                CosmosMsg::Custom(ProvenanceMsgV2 { params, .. }) => {
+                CosmosMsg::Custom(ProvenanceMsg { params, .. }) => {
                     verify_add_attribute_result(params, "wallet.pb", "nameofmine");
                 }
                 _ => panic!("unexpected response message type"),
@@ -645,7 +645,7 @@ mod tests {
             "two messages should be responded with when a fee is not charged, but a refund is made"
         );
         refund_resp.messages.into_iter().for_each(|msg| match msg.msg {
-            CosmosMsg::Custom(ProvenanceMsgV2 { params, .. }) => {
+            CosmosMsg::Custom(ProvenanceMsg { params, .. }) => {
                 verify_add_attribute_result(params, "wallet.pb", "nametouse");
             }
             CosmosMsg::Bank(BankMsg::Send { to_address, amount }) => {
@@ -1114,7 +1114,7 @@ mod tests {
         deps: DepsMut<ProvenanceQuery>,
         message_info: MessageInfo,
         name: String,
-    ) -> Result<Response<ProvenanceMsgV2>, ContractError> {
+    ) -> Result<Response<ProvenanceMsg>, ContractError> {
         execute(
             deps,
             mock_env(),
@@ -1137,7 +1137,7 @@ mod tests {
 
     /// Helper to instantiate the contract without being forced to pass all params, are most are
     /// generally unneeded.
-    fn test_instantiate(inst: InstArgs) -> Result<Response<ProvenanceMsgV2>, StdError> {
+    fn test_instantiate(inst: InstArgs) -> Result<Response<ProvenanceMsg>, StdError> {
         let (deps, fee_amount, fee_address) = match inst {
             InstArgs::Basic { deps } => (deps, DEFAULT_FEE_AMOUNT, "tp123"),
             InstArgs::FeeParams {
