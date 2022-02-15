@@ -1,5 +1,5 @@
 use crate::contract_info::{FEE_DENOMINATION, MAX_NAME_SEARCH_RESULTS};
-use crate::error::{std_err_result, ContractError};
+use crate::error::ContractError;
 use crate::msg::{ExecuteMsg, InitMsg, MigrateMsg, NameResponse, NameSearchResponse, QueryMsg};
 use crate::state::{config, config_read, meta, meta_read, NameMeta, State};
 use crate::version_info::{
@@ -28,8 +28,7 @@ pub fn instantiate(
 ) -> Result<Response<ProvenanceMsg>, ContractError> {
     // Ensure no funds were sent with the message
     if !info.funds.is_empty() {
-        return std_err_result("purchase funds are not allowed to be sent during init")
-            .map_err(ContractError::Std);
+        return ContractError::std_err("purchase funds are not allowed to be sent during init");
     }
     // Verify the fee amount can be converted from string successfully
     fee_amount_from_string(&msg.fee_amount)?;
@@ -41,16 +40,17 @@ pub fn instantiate(
     }) {
         Ok(_) => {}
         Err(e) => {
-            return std_err_result(format!("failed to init state: {:?}", e))
-                .map_err(ContractError::Std);
+            return ContractError::std_err(format!("failed to init state: {:?}", e));
         }
     };
     // Create a message that will bind a restricted name to the contract address.
     let bind_name_msg = match bind_name(&msg.name, env.contract.address, NameBinding::Restricted) {
         Ok(result) => result,
         Err(e) => {
-            return std_err_result(format!("failed to construct bind name message: {:?}", e))
-                .map_err(ContractError::Std);
+            return ContractError::std_err(format!(
+                "failed to construct bind name message: {:?}",
+                e
+            ));
         }
     };
 
@@ -457,10 +457,10 @@ pub fn migrate(
 ///
 /// SHARED FUNCTIONALITY SECTION
 ///
-fn fee_amount_from_string(fee_amount_string: &str) -> StdResult<u128> {
+fn fee_amount_from_string(fee_amount_string: &str) -> Result<u128, ContractError> {
     match fee_amount_string.parse::<u128>() {
         Ok(amount) => Ok(amount),
-        Err(e) => std_err_result(format!(
+        Err(e) => ContractError::std_err(format!(
             "unable to parse input fee amount {} as numeric:\n{}",
             fee_amount_string, e
         )),

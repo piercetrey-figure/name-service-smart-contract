@@ -1,4 +1,4 @@
-use cosmwasm_std::{StdError, StdResult};
+use cosmwasm_std::StdError;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -65,15 +65,14 @@ impl ContractError {
     pub fn to_result<T>(self) -> Result<T, ContractError> {
         Err(self)
     }
+    /// A simple abstraction to wrap an error response just by passing the message
+    pub fn std_err<T>(msg: impl Into<String>) -> Result<T, ContractError> {
+        Err(ContractError::Std(StdError::generic_err(msg)))
+    }
 }
 impl From<semver::Error> for ContractError {
     /// Enables SemVer issues to cast convert implicitly to contract error
     fn from(err: semver::Error) -> Self {
         Self::SemVer(err.to_string())
     }
-}
-
-/// A simple abstraction to wrap an error response just by passing the message
-pub fn std_err_result<T>(msg: impl Into<String>) -> StdResult<T> {
-    Err(StdError::generic_err(msg))
 }
