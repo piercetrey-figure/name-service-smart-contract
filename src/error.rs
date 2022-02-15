@@ -24,10 +24,16 @@ pub enum ContractError {
     NoFundsProvidedForRegistration,
 
     #[error("Previous contract name [{previous_contract:?}] does not match provided name [{provided_contract:?}]")]
-    InvalidContractName { previous_contract: String, provided_contract: String },
+    InvalidContractName {
+        previous_contract: String,
+        provided_contract: String,
+    },
 
     #[error("Previous contract version [{previous_version}] is higher than provided version [{provided_version}]")]
-    InvalidContractVersion { previous_version: String, provided_version: String },
+    InvalidContractVersion {
+        previous_version: String,
+        provided_version: String,
+    },
 
     #[error("Non nhash coin provided for transaction {types:?}")]
     InvalidFundsProvided { types: Vec<String> },

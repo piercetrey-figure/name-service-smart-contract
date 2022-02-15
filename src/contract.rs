@@ -2,6 +2,9 @@ use crate::contract_info::{FEE_DENOMINATION, MAX_NAME_SEARCH_RESULTS};
 use crate::error::{std_err_result, ContractError};
 use crate::msg::{ExecuteMsg, InitMsg, MigrateMsg, NameResponse, NameSearchResponse, QueryMsg};
 use crate::state::{config, config_read, meta, meta_read, NameMeta, State};
+use crate::version_info::{
+    get_version_info, migrate_version_info, CONTRACT_NAME, CONTRACT_VERSION,
+};
 use cosmwasm_std::{
     coin, entry_point, from_binary, to_binary, Api, BankMsg, Binary, CosmosMsg, Deps, DepsMut, Env,
     MessageInfo, Order, Response, StdResult, Uint128,
@@ -12,7 +15,6 @@ use provwasm_std::{
     ProvenanceQuery,
 };
 use semver::Version;
-use crate::version_info::{CONTRACT_NAME, CONTRACT_VERSION, get_version_info, migrate_version_info};
 
 ///
 /// INSTANTIATION SECTION
@@ -26,7 +28,8 @@ pub fn instantiate(
 ) -> Result<Response<ProvenanceMsg>, ContractError> {
     // Ensure no funds were sent with the message
     if !info.funds.is_empty() {
-        return std_err_result("purchase funds are not allowed to be sent during init").map_err(ContractError::Std);
+        return std_err_result("purchase funds are not allowed to be sent during init")
+            .map_err(ContractError::Std);
     }
     // Verify the fee amount can be converted from string successfully
     fee_amount_from_string(&msg.fee_amount)?;
@@ -38,14 +41,16 @@ pub fn instantiate(
     }) {
         Ok(_) => {}
         Err(e) => {
-            return std_err_result(format!("failed to init state: {:?}", e)).map_err(ContractError::Std);
+            return std_err_result(format!("failed to init state: {:?}", e))
+                .map_err(ContractError::Std);
         }
     };
     // Create a message that will bind a restricted name to the contract address.
     let bind_name_msg = match bind_name(&msg.name, env.contract.address, NameBinding::Restricted) {
         Ok(result) => result,
         Err(e) => {
-            return std_err_result(format!("failed to construct bind name message: {:?}", e)).map_err(ContractError::Std);
+            return std_err_result(format!("failed to construct bind name message: {:?}", e))
+                .map_err(ContractError::Std);
         }
     };
 
@@ -295,7 +300,10 @@ fn validate_fee_params_get_messages(
     // If any funds are found that do not match the fee denom, exit prematurely to prevent
     // contract from siphoning random funds for no reason
     if !invalid_funds.is_empty() {
-        return ContractError::InvalidFundsProvided { types: invalid_funds }.to_result();
+        return ContractError::InvalidFundsProvided {
+            types: invalid_funds,
+        }
+        .to_result();
     }
 
     let nhash_fee_amount = fee_amount_from_string(&config.fee_amount)?;
@@ -325,7 +333,8 @@ fn validate_fee_params_get_messages(
         return ContractError::InsufficientFundsProvided {
             amount_provided: nhash_sent.u128(),
             amount_required: nhash_fee_amount,
-        }.to_result();
+        }
+        .to_result();
     }
 
     // Pull the fee amount from the sender for name registration
@@ -378,7 +387,8 @@ pub fn migrate(
         return ContractError::InvalidContractName {
             previous_contract: stored_version_info.contract,
             provided_contract: CONTRACT_NAME.to_string(),
-        }.to_result();
+        }
+        .to_result();
     }
     let contract_version = CONTRACT_VERSION.parse::<Version>()?;
     // If the stored version in the contract is greater than the derived version from the package,
@@ -387,7 +397,8 @@ pub fn migrate(
         return ContractError::InvalidContractVersion {
             previous_version: stored_version_info.version,
             provided_version: CONTRACT_VERSION.to_string(),
-        }.to_result();
+        }
+        .to_result();
     }
     let mut attributes: Vec<cosmwasm_std::Attribute> = vec![];
     // If any optional migration values were provided, swap them over during the migration
@@ -442,13 +453,13 @@ mod tests {
     use crate::msg::QueryResponse;
 
     use super::*;
+    use crate::version_info::{set_version_info, VersionInfoV1};
     use cosmwasm_std::testing::{mock_env, mock_info};
     use cosmwasm_std::{from_binary, Addr, Coin, CosmosMsg};
     use provwasm_mocks::mock_dependencies;
     use provwasm_std::{
         AttributeMsgParams, AttributeValueType, NameMsgParams, ProvenanceMsgParams,
     };
-    use crate::version_info::{set_version_info, VersionInfoV1};
 
     const DEFAULT_FEE_AMOUNT: u128 = 10000000000;
 
@@ -1119,21 +1130,25 @@ mod tests {
         let mut deps = mock_dependencies(&[]);
         test_instantiate(InstArgs::Basic {
             deps: deps.as_mut(),
-        }).unwrap();
+        })
+        .unwrap();
         // Override the internal contract name to a new, different name
         set_version_info(
             deps.as_mut().storage,
             &VersionInfoV1 {
                 contract: "Fake Name".to_string(),
                 version: CONTRACT_VERSION.to_string(),
-            }
-        ).unwrap();
+            },
+        )
+        .unwrap();
         let error = migrate(deps.as_mut(), mock_env(), MigrateMsg::empty()).unwrap_err();
         match error {
-            ContractError::InvalidContractName { previous_contract, provided_contract } => {
+            ContractError::InvalidContractName {
+                previous_contract,
+                provided_contract,
+            } => {
                 assert_eq!(
-                    "Fake Name",
-                    previous_contract,
+                    "Fake Name", previous_contract,
                     "the previous contract name should be the value in storage",
                 );
                 assert_eq!(
@@ -1141,7 +1156,7 @@ mod tests {
                     provided_contract.as_str(),
                     "the provided contract name should be the cargo package name",
                 );
-            },
+            }
             _ => panic!("unexpected error encountered when bad contract name provided"),
         };
     }
@@ -1149,21 +1164,27 @@ mod tests {
     #[test]
     fn test_migration_with_invalid_version() {
         let mut deps = mock_dependencies(&[]);
-        test_instantiate(InstArgs::Basic { deps: deps.as_mut() }).unwrap();
+        test_instantiate(InstArgs::Basic {
+            deps: deps.as_mut(),
+        })
+        .unwrap();
         // Override the internal contract version to a version one minor value above the current version
         set_version_info(
             deps.as_mut().storage,
             &VersionInfoV1 {
                 contract: CONTRACT_NAME.to_string(),
                 version: "0.2.1".to_string(),
-            }
-        ).unwrap();
+            },
+        )
+        .unwrap();
         let error = migrate(deps.as_mut(), mock_env(), MigrateMsg::empty()).unwrap_err();
         match error {
-            ContractError::InvalidContractVersion { previous_version, provided_version } => {
+            ContractError::InvalidContractVersion {
+                previous_version,
+                provided_version,
+            } => {
                 assert_eq!(
-                    "0.2.1",
-                    previous_version,
+                    "0.2.1", previous_version,
                     "the previous contract version should be the value in storage",
                 );
                 assert_eq!(
@@ -1171,7 +1192,7 @@ mod tests {
                     provided_version.as_str(),
                     "the provided contract version should be the cargo package version",
                 );
-            },
+            }
             _ => panic!("unexpected error encountered when bad contract version provided"),
         }
     }

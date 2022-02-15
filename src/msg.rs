@@ -44,7 +44,10 @@ impl MigrateMsg {
     }
 
     pub fn empty() -> MigrateMsg {
-        MigrateMsg { new_fee_amount: None, new_fee_collection_address: None }
+        MigrateMsg {
+            new_fee_amount: None,
+            new_fee_collection_address: None,
+        }
     }
 }
 

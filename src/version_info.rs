@@ -1,9 +1,9 @@
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use crate::error::ContractError;
 use cosmwasm_std::Storage;
 use cw_storage_plus::Item;
+use schemars::JsonSchema;
 use semver::Version;
-use crate::error::ContractError;
+use serde::{Deserialize, Serialize};
 
 // When cargo is building this project, it automatically adds these env vars for the code to infer.
 // See Cargo.toml's name and version fields in the [package] section for the values.
@@ -29,7 +29,10 @@ impl VersionInfoV1 {
 }
 
 /// Sets the contract's version definition directly to the specified VersionInfoV1 struct
-pub fn set_version_info(storage: &mut dyn Storage, version_info: &VersionInfoV1) -> Result<(), ContractError> {
+pub fn set_version_info(
+    storage: &mut dyn Storage,
+    version_info: &VersionInfoV1,
+) -> Result<(), ContractError> {
     VERSION_INFO
         .save(storage, version_info)
         .map_err(ContractError::Std)
@@ -52,8 +55,11 @@ pub fn migrate_version_info(storage: &mut dyn Storage) -> Result<VersionInfoV1, 
 
 #[cfg(test)]
 mod tests {
+    use crate::version_info::{
+        get_version_info, migrate_version_info, set_version_info, VersionInfoV1, CONTRACT_NAME,
+        CONTRACT_VERSION,
+    };
     use cosmwasm_std::testing::mock_dependencies;
-    use crate::version_info::{get_version_info, migrate_version_info, set_version_info, CONTRACT_NAME, CONTRACT_VERSION, VersionInfoV1};
 
     #[test]
     fn test_set_and_get_version_info() {
@@ -63,12 +69,20 @@ mod tests {
             &VersionInfoV1 {
                 contract: "CONTRACT".into(),
                 version: "4.2.0".into(),
-            }
+            },
         );
         assert!(result.is_ok(), "storage should succeed");
         let info = get_version_info(&deps.storage).unwrap();
-        assert_eq!("CONTRACT", info.contract.as_str(), "the proper contract name should be returned");
-        assert_eq!("4.2.0", info.version.as_str(), "the proper contract version should be returned");
+        assert_eq!(
+            "CONTRACT",
+            info.contract.as_str(),
+            "the proper contract name should be returned"
+        );
+        assert_eq!(
+            "4.2.0",
+            info.version.as_str(),
+            "the proper contract version should be returned"
+        );
     }
 
     #[test]
