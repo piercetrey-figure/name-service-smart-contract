@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 // See Cargo.toml's name and version fields in the [package] section for the values.
 // NOTE: The program verifies that migrated versions match the contract name and have a greater
 // version than that which was previous stored. Ensure to update the version field on each release
-// before migrating, because the code will reject same-version migrations.
+// before migrating, because it's important to be able to differentiate versions as they're applied.
 pub const CONTRACT_NAME: &str = env!("CARGO_CRATE_NAME");
 pub const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const VERSION_INFO_NAMESPACE: &str = "version_info";
