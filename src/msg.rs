@@ -34,7 +34,15 @@ pub type QueryResponse = State;
 /// Migrate the contract
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub struct MigrateMsg {}
+pub struct MigrateMsg {
+    pub new_fee_amount: Option<String>,
+    pub new_fee_collection_address: Option<String>,
+}
+impl MigrateMsg {
+    pub fn has_fee_changes(&self) -> bool {
+        self.new_fee_amount.is_some() || self.new_fee_collection_address.is_some()
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]

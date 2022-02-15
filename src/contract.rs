@@ -3,19 +3,21 @@ use crate::error::{std_err_result, ContractError};
 use crate::msg::{ExecuteMsg, InitMsg, MigrateMsg, NameResponse, NameSearchResponse, QueryMsg};
 use crate::state::{config, config_read, meta, meta_read, NameMeta, State};
 use cosmwasm_std::{
-    coin, from_binary, to_binary, Api, BankMsg, Binary, CosmosMsg, Deps, DepsMut, Env, MessageInfo,
-    Order, Response, StdError, StdResult, Uint128,
+    coin, entry_point, from_binary, to_binary, Api, BankMsg, Binary, CosmosMsg, Deps, DepsMut, Env,
+    MessageInfo, Order, Response, StdError, StdResult, Uint128,
 };
 use cosmwasm_storage::Bucket;
 use provwasm_std::{
     add_attribute, bind_name, Attribute, Attributes, NameBinding, ProvenanceMsg, ProvenanceQuerier,
+    ProvenanceQuery,
 };
 
 ///
 /// INSTANTIATION SECTION
 ///
+#[entry_point]
 pub fn instantiate(
-    deps: DepsMut,
+    deps: DepsMut<ProvenanceQuery>,
     env: Env,
     info: MessageInfo,
     msg: InitMsg,
@@ -54,7 +56,8 @@ pub fn instantiate(
 ///
 /// QUERY SECTION
 ///
-pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
+#[entry_point]
+pub fn query(deps: Deps<ProvenanceQuery>, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::QueryRequest {} => {
             let state = config_read(deps.storage).load()?;
@@ -72,7 +75,7 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     }
 }
 
-fn try_query_by_address(deps: Deps, address: String) -> StdResult<Binary> {
+fn try_query_by_address(deps: Deps<ProvenanceQuery>, address: String) -> StdResult<Binary> {
     // Implicitly pull the root registrar name out of the state
     let registrar_name = match config_read(deps.storage).load() {
         Ok(config) => config.name,
@@ -131,7 +134,7 @@ fn deserialize_name_from_attribute(attribute: &Attribute) -> String {
 
 /// Scans the entire storage for the target name string by doing direct matches.
 /// Will only ever return a maximum of MAX_NAME_SEARCH_RESULTS.
-fn search_for_names(deps: Deps, search: String) -> StdResult<Binary> {
+fn search_for_names(deps: Deps<ProvenanceQuery>, search: String) -> StdResult<Binary> {
     let meta_storage = meta_read(deps.storage);
     let search_str = search.as_str();
     let names = meta_storage
@@ -151,8 +154,9 @@ fn search_for_names(deps: Deps, search: String) -> StdResult<Binary> {
 ///
 /// EXECUTE SECTION
 ///
+#[entry_point]
 pub fn execute(
-    deps: DepsMut,
+    deps: DepsMut<ProvenanceQuery>,
     _env: Env,
     info: MessageInfo,
     msg: ExecuteMsg,
@@ -164,7 +168,7 @@ pub fn execute(
 
 // register a name
 fn try_register(
-    deps: DepsMut,
+    deps: DepsMut<ProvenanceQuery>,
     info: MessageInfo,
     name: String,
 ) -> Result<Response<ProvenanceMsg>, ContractError> {
@@ -358,10 +362,42 @@ fn validate_fee_params_get_messages(
 ///
 /// MIGRATE SECTION
 ///
-/// TODO: Allow fee amount swap across migrations
-///
-pub fn migrate(_deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
-    Ok(Response::default())
+#[entry_point]
+pub fn migrate(
+    deps: DepsMut<ProvenanceQuery>,
+    _env: Env,
+    msg: MigrateMsg,
+) -> Result<Response, ContractError> {
+    let mut attributes: Vec<cosmwasm_std::Attribute> = vec![];
+    // If any optional migration values were provided, swap them over during the migration
+    if msg.has_fee_changes() {
+        let mut config = config(deps.storage);
+        let mut state = config.load()?;
+        state.fee_amount = match msg.new_fee_amount {
+            Some(amount) => {
+                fee_amount_from_string(amount.as_str())?;
+                attributes.push(cosmwasm_std::Attribute::new(
+                    "fee_amount_updated",
+                    amount.clone(),
+                ));
+                amount
+            }
+            None => state.fee_amount,
+        };
+        state.fee_collection_address = match msg.new_fee_collection_address {
+            Some(addr_str) => {
+                deps.api.addr_validate(addr_str.as_str())?;
+                attributes.push(cosmwasm_std::Attribute::new(
+                    "fee_collection_address_updated",
+                    addr_str.clone(),
+                ));
+                addr_str
+            }
+            None => state.fee_collection_address,
+        };
+        config.save(&state)?;
+    }
+    Ok(Response::new().add_attributes(attributes))
 }
 
 ///
@@ -928,6 +964,142 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_migration_with_no_state_changes() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::Basic {
+            deps: deps.as_mut(),
+        })
+        .unwrap();
+        let migrate_response = migrate(
+            deps.as_mut(),
+            mock_env(),
+            MigrateMsg {
+                new_fee_amount: None,
+                new_fee_collection_address: None,
+            },
+        )
+        .unwrap();
+        assert!(
+            migrate_response.attributes.is_empty(),
+            "no attributes should be added, indicating that the migration made no changes"
+        );
+    }
+
+    #[test]
+    fn test_migration_with_only_fee_changed() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::FeeParams {
+            deps: deps.as_mut(),
+            fee_amount: 100,
+            fee_collection_address: "fake_address".into(),
+        })
+        .unwrap();
+        let migrate_response = migrate(
+            deps.as_mut(),
+            mock_env(),
+            MigrateMsg {
+                new_fee_amount: Some("150".to_string()),
+                new_fee_collection_address: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            1,
+            migrate_response.attributes.len(),
+            "only one attribute should be added, indicating that a single state value was changed"
+        );
+        let attribute = migrate_response
+            .attributes
+            .first()
+            .expect("The first element should be available within the migration values");
+        assert_eq!(
+            "fee_amount_updated",
+            attribute.key.as_str(),
+            "Expected the key to show that the fee was changed",
+        );
+        assert_eq!(
+            "150",
+            attribute.value.as_str(),
+            "Expected the value to show the new value that the fee amount was updated to",
+        );
+    }
+
+    #[test]
+    fn test_migration_with_only_fee_address_changed() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::FeeParams {
+            deps: deps.as_mut(),
+            fee_amount: 100,
+            fee_collection_address: "fake_address".into(),
+        })
+        .unwrap();
+        let migrate_response = migrate(
+            deps.as_mut(),
+            mock_env(),
+            MigrateMsg {
+                new_fee_amount: None,
+                new_fee_collection_address: Some("new_address".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            1,
+            migrate_response.attributes.len(),
+            "only one attribute should be added, indicating that a single state value was changed"
+        );
+        let attribute = migrate_response
+            .attributes
+            .first()
+            .expect("The first element should be available within the migration values");
+        assert_eq!(
+            "fee_collection_address_updated",
+            attribute.key.as_str(),
+            "Expected the key to show that the fee address was changed",
+        );
+        assert_eq!(
+            "new_address",
+            attribute.value.as_str(),
+            "Expected the value to show the new value that the fee address was updated to",
+        );
+    }
+
+    #[test]
+    fn test_migration_with_invalid_new_fee_amount() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::Basic {
+            deps: deps.as_mut(),
+        })
+        .unwrap();
+        migrate(
+            deps.as_mut(),
+            mock_env(),
+            MigrateMsg {
+                new_fee_amount: Some("not a number".to_string()),
+                new_fee_collection_address: None,
+            },
+        )
+        .unwrap_err();
+    }
+
+    #[test]
+    fn test_migration_with_invalid_new_fee_collection_address() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::Basic {
+            deps: deps.as_mut(),
+        })
+        .unwrap();
+        migrate(
+            deps.as_mut(),
+            mock_env(),
+            MigrateMsg {
+                new_fee_amount: None,
+                new_fee_collection_address: Some("".to_string()),
+            },
+        )
+        .unwrap_err();
+    }
+
     /// Helper to build an Attribute without having to do all the un-fun stuff repeatedly
     fn create_fake_name_attribute(name: &str) -> Attribute {
         Attribute {
@@ -939,7 +1111,7 @@ mod tests {
 
     /// Helper to do a registration without all the extra boilerplate
     fn do_registration(
-        deps: DepsMut,
+        deps: DepsMut<ProvenanceQuery>,
         message_info: MessageInfo,
         name: String,
     ) -> Result<Response<ProvenanceMsg>, ContractError> {
@@ -954,10 +1126,10 @@ mod tests {
     /// Driver for multiple instantiate types, on the chance that different defaults are needed
     enum InstArgs<'a> {
         Basic {
-            deps: DepsMut<'a>,
+            deps: DepsMut<'a, ProvenanceQuery>,
         },
         FeeParams {
-            deps: DepsMut<'a>,
+            deps: DepsMut<'a, ProvenanceQuery>,
             fee_amount: u128,
             fee_collection_address: &'a str,
         },
