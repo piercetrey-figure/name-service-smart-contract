@@ -23,16 +23,16 @@ pub enum ContractError {
     #[error("No nhash amount provided during name registration")]
     NoFundsProvidedForRegistration,
 
-    #[error("Previous contract name [{previous_contract:?}] does not match provided name [{provided_contract:?}]")]
+    #[error("Current contract name [{current_contract}] does not match provided migration name [{migration_contract}]")]
     InvalidContractName {
-        previous_contract: String,
-        provided_contract: String,
+        current_contract: String,
+        migration_contract: String,
     },
 
-    #[error("Previous contract version [{previous_version}] is higher than provided version [{provided_version}]")]
+    #[error("Current contract version [{current_version}] is higher than provided migration version [{migration_version}]")]
     InvalidContractVersion {
-        previous_version: String,
-        provided_version: String,
+        current_version: String,
+        migration_version: String,
     },
 
     #[error("Non nhash coin provided for transaction {types:?}")]
@@ -52,6 +52,9 @@ pub enum ContractError {
 
     #[error("Semver parsing error: {0}")]
     SemVer(String),
+
+    #[error("Query failed: {0}")]
+    QueryError(String),
 }
 impl ContractError {
     /// Allows ContractError instances to be generically returned as a Response in a fluent manner

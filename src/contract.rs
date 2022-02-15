@@ -67,7 +67,11 @@ pub fn instantiate(
 /// QUERY SECTION
 ///
 #[entry_point]
-pub fn query(deps: Deps<ProvenanceQuery>, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
+pub fn query(
+    deps: Deps<ProvenanceQuery>,
+    _env: Env,
+    msg: QueryMsg,
+) -> Result<Binary, ContractError> {
     match msg {
         QueryMsg::QueryRequest {} => {
             let state = config_read(deps.storage).load()?;
@@ -82,22 +86,35 @@ pub fn query(deps: Deps<ProvenanceQuery>, _env: Env, msg: QueryMsg) -> StdResult
         }
         QueryMsg::QueryNamesByAddress { address } => try_query_by_address(deps, address),
         QueryMsg::SearchForNames { search } => search_for_names(deps, search),
+        QueryMsg::Version {} => {
+            let version_info = get_version_info(deps.storage)?;
+            let json = to_binary(&version_info)?;
+            Ok(json)
+        }
     }
 }
 
-fn try_query_by_address(deps: Deps<ProvenanceQuery>, address: String) -> StdResult<Binary> {
+fn try_query_by_address(
+    deps: Deps<ProvenanceQuery>,
+    address: String,
+) -> Result<Binary, ContractError> {
     // Implicitly pull the root registrar name out of the state
     let registrar_name = match config_read(deps.storage).load() {
         Ok(config) => config.name,
         Err(e) => {
-            return std_err_result(format!("failed to load registrar name: {:?}", e));
+            return ContractError::QueryError(format!("failed to load registrar name: {:?}", e))
+                .to_result();
         }
     };
     // Validate and convert the provided address into an Addr for the attribute query
     let validated_address = match deps.api.addr_validate(address.as_str()) {
         Ok(addr) => addr,
         Err(e) => {
-            return std_err_result(format!("invalid address provided [{}]: {:?}", address, e));
+            return ContractError::QueryError(format!(
+                "invalid address provided [{}]: {:?}",
+                address, e
+            ))
+            .to_result();
         }
     };
     // Check for the registered name inside the attributes of the target address
@@ -106,20 +123,22 @@ fn try_query_by_address(deps: Deps<ProvenanceQuery>, address: String) -> StdResu
     {
         Ok(attributes) => attributes,
         Err(e) => {
-            return std_err_result(format!(
+            return ContractError::QueryError(format!(
                 "failed to lookup account by address [{}]: {:?}",
                 address, e
-            ));
+            ))
+            .to_result();
         }
     };
     // Deserialize all names from their binary-encoded values to the source strings
     let response_bin = match pack_response_from_attributes(attribute_container) {
         Ok(binary) => binary,
         Err(e) => {
-            return std_err_result(format!(
+            return ContractError::QueryError(format!(
                 "failed to pack attribute response to binary: {:?}",
                 e
             ))
+            .to_result();
         }
     };
     // After establishing a vector of all derived names, serialize the list itself to a binary response
@@ -144,7 +163,7 @@ fn deserialize_name_from_attribute(attribute: &Attribute) -> String {
 
 /// Scans the entire storage for the target name string by doing direct matches.
 /// Will only ever return a maximum of MAX_NAME_SEARCH_RESULTS.
-fn search_for_names(deps: Deps<ProvenanceQuery>, search: String) -> StdResult<Binary> {
+fn search_for_names(deps: Deps<ProvenanceQuery>, search: String) -> Result<Binary, ContractError> {
     let meta_storage = meta_read(deps.storage);
     let search_str = search.as_str();
     let names = meta_storage
@@ -159,6 +178,7 @@ fn search_for_names(deps: Deps<ProvenanceQuery>, search: String) -> StdResult<Bi
         search: search.clone(),
         names,
     })
+    .map_err(ContractError::Std)
 }
 
 ///
@@ -385,8 +405,8 @@ pub fn migrate(
     // check will reject the change
     if CONTRACT_NAME != stored_version_info.contract {
         return ContractError::InvalidContractName {
-            previous_contract: stored_version_info.contract,
-            provided_contract: CONTRACT_NAME.to_string(),
+            current_contract: stored_version_info.contract,
+            migration_contract: CONTRACT_NAME.to_string(),
         }
         .to_result();
     }
@@ -395,8 +415,8 @@ pub fn migrate(
     // then this migration is effectively a downgrade and should not be committed
     if stored_version_info.parse_sem_ver()? > contract_version {
         return ContractError::InvalidContractVersion {
-            previous_version: stored_version_info.version,
-            provided_version: CONTRACT_VERSION.to_string(),
+            current_version: stored_version_info.version,
+            migration_version: CONTRACT_VERSION.to_string(),
         }
         .to_result();
     }
@@ -429,6 +449,8 @@ pub fn migrate(
         };
         config.save(&state)?;
     }
+    // Ensure that the new contract version is stored for future migrations to reference
+    migrate_version_info(deps.storage)?;
     Ok(Response::new().add_attributes(attributes))
 }
 
@@ -486,6 +508,17 @@ mod tests {
             },
             _ => panic!("unexpected cosmos message"),
         }
+        let version_info = get_version_info(deps.as_ref().storage).unwrap();
+        assert_eq!(
+            CONTRACT_NAME,
+            version_info.contract.as_str(),
+            "the contract name should be stored in version info on a successful instantiation",
+        );
+        assert_eq!(
+            CONTRACT_VERSION,
+            version_info.version.as_str(),
+            "the contract version should be stored in version info on a successful instantiation",
+        );
     }
 
     #[test]
@@ -1012,6 +1045,36 @@ mod tests {
     }
 
     #[test]
+    fn test_migration_to_new_version_sets_version_info() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::Basic {
+            deps: deps.as_mut(),
+        })
+        .unwrap();
+        // Downgrade the contract internally to verify that the values are reset after migration
+        set_version_info(
+            deps.as_mut().storage,
+            &VersionInfoV1 {
+                contract: CONTRACT_NAME.to_string(),
+                version: "0.0.1".to_string(),
+            },
+        )
+        .unwrap();
+        migrate(deps.as_mut(), mock_env(), MigrateMsg::empty()).unwrap();
+        let version_info = get_version_info(deps.as_ref().storage).unwrap();
+        assert_eq!(
+            CONTRACT_NAME,
+            version_info.contract.as_str(),
+            "the proper contract name should be set after the migration completes",
+        );
+        assert_eq!(
+            CONTRACT_VERSION,
+            version_info.version.as_str(),
+            "the proper contract version should be set after the migration completes",
+        );
+    }
+
+    #[test]
     fn test_migration_with_only_fee_changed() {
         let mut deps = mock_dependencies(&[]);
         test_instantiate(InstArgs::FeeParams {
@@ -1144,17 +1207,17 @@ mod tests {
         let error = migrate(deps.as_mut(), mock_env(), MigrateMsg::empty()).unwrap_err();
         match error {
             ContractError::InvalidContractName {
-                previous_contract,
-                provided_contract,
+                current_contract,
+                migration_contract,
             } => {
                 assert_eq!(
-                    "Fake Name", previous_contract,
-                    "the previous contract name should be the value in storage",
+                    "Fake Name", current_contract,
+                    "the current contract name should be the value in storage",
                 );
                 assert_eq!(
                     CONTRACT_NAME,
-                    provided_contract.as_str(),
-                    "the provided contract name should be the cargo package name",
+                    migration_contract.as_str(),
+                    "the migration contract name should be the cargo package name",
                 );
             }
             _ => panic!("unexpected error encountered when bad contract name provided"),
@@ -1168,33 +1231,54 @@ mod tests {
             deps: deps.as_mut(),
         })
         .unwrap();
-        // Override the internal contract version to a version one minor value above the current version
+        // Override the internal contract version to a version largely above the current version
         set_version_info(
             deps.as_mut().storage,
             &VersionInfoV1 {
                 contract: CONTRACT_NAME.to_string(),
-                version: "0.2.1".to_string(),
+                version: "9.9.9".to_string(),
             },
         )
         .unwrap();
         let error = migrate(deps.as_mut(), mock_env(), MigrateMsg::empty()).unwrap_err();
         match error {
             ContractError::InvalidContractVersion {
-                previous_version,
-                provided_version,
+                current_version,
+                migration_version,
             } => {
                 assert_eq!(
-                    "0.2.1", previous_version,
-                    "the previous contract version should be the value in storage",
+                    "9.9.9", current_version,
+                    "the current contract version should be the value in storage",
                 );
                 assert_eq!(
                     CONTRACT_VERSION,
-                    provided_version.as_str(),
-                    "the provided contract version should be the cargo package version",
+                    migration_version.as_str(),
+                    "the migration contract version should be the cargo package version",
                 );
             }
             _ => panic!("unexpected error encountered when bad contract version provided"),
         }
+    }
+
+    #[test]
+    fn query_version_test() {
+        let mut deps = mock_dependencies(&[]);
+        test_instantiate(InstArgs::Basic {
+            deps: deps.as_mut(),
+        })
+        .unwrap();
+        let version_bin = query(deps.as_ref(), mock_env(), QueryMsg::Version {}).unwrap();
+        let version_info = from_binary::<VersionInfoV1>(&version_bin).unwrap();
+        assert_eq!(
+            CONTRACT_NAME,
+            version_info.contract.as_str(),
+            "the contract name should properly be returned via the query",
+        );
+        assert_eq!(
+            CONTRACT_VERSION,
+            version_info.version.as_str(),
+            "the contract version should properly be returned via the query",
+        );
     }
 
     /// Helper to build an Attribute without having to do all the un-fun stuff repeatedly

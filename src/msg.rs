@@ -26,6 +26,7 @@ pub enum QueryMsg {
     QueryAddressByName { name: String },
     QueryNamesByAddress { address: String },
     SearchForNames { search: String },
+    Version {},
 }
 
 /// A type alias for contract state.

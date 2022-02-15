@@ -74,6 +74,18 @@
         }
       },
       "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "version"
+      ],
+      "properties": {
+        "version": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
     }
   ]
 }
