@@ -26,6 +26,7 @@ pub enum QueryMsg {
     QueryAddressByName { name: String },
     QueryNamesByAddress { address: String },
     SearchForNames { search: String },
+    Version {},
 }
 
 /// A type alias for contract state.
@@ -41,6 +42,13 @@ pub struct MigrateMsg {
 impl MigrateMsg {
     pub fn has_fee_changes(&self) -> bool {
         self.new_fee_amount.is_some() || self.new_fee_collection_address.is_some()
+    }
+
+    pub fn empty() -> MigrateMsg {
+        MigrateMsg {
+            new_fee_amount: None,
+            new_fee_collection_address: None,
+        }
     }
 }
 
