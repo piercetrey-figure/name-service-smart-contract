@@ -1,4 +1,4 @@
-use crate::error::ContractError;
+use crate::core::error::ContractError;
 use cosmwasm_std::Storage;
 use cw_storage_plus::Item;
 use schemars::JsonSchema;
@@ -55,7 +55,7 @@ pub fn migrate_version_info(storage: &mut dyn Storage) -> Result<VersionInfoV1, 
 
 #[cfg(test)]
 mod tests {
-    use crate::version_info::{
+    use crate::migrate::version_info::{
         get_version_info, migrate_version_info, set_version_info, VersionInfoV1, CONTRACT_NAME,
         CONTRACT_VERSION,
     };
