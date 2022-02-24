@@ -31,6 +31,8 @@ overflow-checks = true
 backtraces = ["cosmwasm-std/backtraces"]
 # use library feature to disable all instantiate/execute/query exports
 library = []
+# enable-test-utils allows the test classes to expose shared code amongst each other
+enable-test-utils = []
 
 [package.metadata.scripts]
 optimize = """docker run --rm -v "$(pwd)":/code \

@@ -1,7 +1,13 @@
 #![warn(clippy::all)]
+// Public modules
 pub mod contract;
-pub mod contract_info;
-pub mod error;
-pub mod msg;
-pub mod state;
-pub mod version_info;
+pub mod core;
+pub mod execute;
+pub mod instantiate;
+pub mod migrate;
+pub mod query;
+pub mod util;
+
+// Conditional modules
+#[cfg(feature = "enable-test-utils")]
+pub mod testutil;

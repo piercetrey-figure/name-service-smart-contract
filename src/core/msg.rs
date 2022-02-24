@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::state::{NameMeta, State};
+use crate::core::state::{NameMeta, State};
 
 /// A message sent to initialize the contract state.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
